@@ -10,6 +10,8 @@ export type ClientExportOptions = {
   audioStream?: MediaStream;
   fileName: string;
   fps?: number;
+  /** Target audio bitrate in kbps (browser may approximate). */
+  audioBitrateKbps?: number;
   onProgress?: (progress: number, stage: string) => void;
   signal?: AbortSignal;
 };
@@ -46,7 +48,7 @@ function downloadBlob(blob: Blob, fileName: string) {
  * downloads the result. Runs at (approx) real-time playback speed.
  */
 export async function exportClientVideo(options: ClientExportOptions): Promise<{blob: Blob; objectUrl: string; fileName: string}> {
-  const {canvas, audio, audioStream, fileName, fps = 30, onProgress, signal} = options;
+  const {canvas, audio, audioStream, fileName, fps = 30, audioBitrateKbps = 256, onProgress, signal} = options;
   if (typeof MediaRecorder === "undefined") {
     throw new Error("MediaRecorder is not supported in this browser — try Chrome, Edge, or Firefox.");
   }
@@ -67,7 +69,7 @@ export async function exportClientVideo(options: ClientExportOptions): Promise<{
   const recorder = new MediaRecorder(combined, {
     mimeType,
     videoBitsPerSecond: 8_000_000,
-    audioBitsPerSecond: 256_000,
+    audioBitsPerSecond: Math.max(96_000, Math.min(320_000, audioBitrateKbps * 1000)),
   });
 
   recorder.ondataavailable = (event) => {

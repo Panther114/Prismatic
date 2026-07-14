@@ -376,6 +376,7 @@ export default function App() {
         audioStream: recordDestRef.current?.stream,
         fileName: visualsFileName(selected.title),
         fps: 30,
+        audioBitrateKbps: settings.audioBitrate,
         signal: controller.signal,
         onProgress: (progressValue, stage) => {
           setJobs((items) => items.map((item) =>
