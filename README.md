@@ -13,7 +13,7 @@ Or: **New Project → Deploy from GitHub** and point at this repo. Railway picks
 
 - Import audio in the browser (or, in local dev, from a `music/` folder + watched folders)
 - Live audio-reactive visualizer with water ripples, spectrum pillars, and vinyl cover art
-- Export masters with **MediaRecorder in Chrome / Edge / Firefox** (WebM, or MP4 when the browser supports it)
+- Export masters **offline in the browser** (WebCodecs: analyze → draw → encode, often many× faster than real-time). MediaRecorder is only a fallback.
 - Resolution presets: 720p, 1080p, 4K, square, portrait
 
 ## Quick start (local)

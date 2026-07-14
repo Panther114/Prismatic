@@ -355,24 +355,26 @@ export default function App() {
       log: ["Encoding on your device (server stays idle)."],
     };
     setJobs((items) => [job, ...items]);
-    setExportSize({width: settings.width, height: settings.height});
-    setView("visualize");
+    // Offline WebCodecs path does not need the live canvas locked; keep UI free.
+    // Realtime fallback still benefits from exportSize if offline fails.
+    setExportSize(null);
+    setView("renders");
 
     const controller = new AbortController();
     exportAbortRef.current = controller;
 
     try {
-      await ensureAudioGraph();
-      // Let canvas resize to export resolution
-      await new Promise((r) => window.setTimeout(r, 80));
+      // Optional live graph for MediaRecorder fallback only
+      await ensureAudioGraph().catch(() => undefined);
       const canvas = visualizerRef.current?.getCanvas();
       const audio = audioRef.current;
-      if (!canvas || !audio) throw new Error("Visualizer or audio element is not ready");
 
-      setPlaying(true);
       const result = await exportClientVideo({
-        canvas,
-        audio,
+        mediaUrl: selected.mediaUrl,
+        width: settings.width,
+        height: settings.height,
+        canvas: canvas ?? undefined,
+        audio: audio ?? undefined,
         audioStream: recordDestRef.current?.stream,
         fileName: visualsFileName(selected.title),
         fps: 30,
@@ -416,8 +418,6 @@ export default function App() {
     } finally {
       setExportSize(null);
       exportAbortRef.current = null;
-      setPlaying(false);
-      audioRef.current?.pause();
     }
   };
 
@@ -807,7 +807,7 @@ export default function App() {
             </select>
           </label>
           <p className="save-hint mono">
-            Browser export · {visualsFileName(title || selected?.title || "Track")} · server stays idle
+            Offline browser encode (faster than real-time) · {visualsFileName(title || selected?.title || "Track")}
           </p>
           <button className="render-button" onClick={() => void startRender()} disabled={!selected || Boolean(activeJob)}>
             <span>{activeJob ? activeJob.stage : "Export video"}</span>
