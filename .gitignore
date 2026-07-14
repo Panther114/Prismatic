@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+.out/
+*.tsbuildinfo
+
+# Prismatic local state & user data
+.prismatic/
+music/
+output/
+*.mp4
+*.webm
+*.wav
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.opus
+!public/**/*.png
+!public/**/*.svg
+
+# Outdated / experimental pipelines (not part of the app)
+remotion/
+hyperframes/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Logs & OS
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local tooling / previews
+app-preview*.png
+design-comparison.png
+design-qa.md
+.media/
+output/playwright/
+.playwright/
+
+# Optional native render cache (local only)
+.cache/

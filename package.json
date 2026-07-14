@@ -1,0 +1,47 @@
+{
+  "name": "prismatic",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Prismatic — cinematic music visualizer. Browser-side export keeps the host lightweight.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "build": "vite build",
+    "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm build",
+    "prepare:sample": "tsx scripts/prepare-sample.ts",
+    "render:sample": "tsx scripts/render-sample.ts"
+  },
+  "dependencies": {
+    "@fontsource/barlow-condensed": "^5.2.8",
+    "@fontsource/ibm-plex-sans": "^5.2.7",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@vitejs/plugin-react": "^4.7.0",
+    "cross-env": "^7.0.3",
+    "express": "^5.1.0",
+    "fft.js": "^4.0.4",
+    "lucide-react": "^0.525.0",
+    "multer": "^2.0.2",
+    "music-metadata": "^11.8.3",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "tsx": "^4.20.3",
+    "vite": "^7.0.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.0.14",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "typescript": "^5.8.3"
+  },
+  "optionalDependencies": {
+    "@napi-rs/canvas": "^0.1.80"
+  },
+  "packageManager": "pnpm@11.7.0"
+}

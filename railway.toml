@@ -1,0 +1,14 @@
+# Prismatic — one-click Railway deploy
+# Video export runs entirely in the user's browser (MediaRecorder).
+# The service only serves the SPA + a tiny health API (low RAM).
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pnpm install --frozen-lockfile && pnpm build"
+
+[deploy]
+startCommand = "pnpm start"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
