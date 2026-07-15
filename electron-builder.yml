@@ -8,26 +8,24 @@ directories:
 icon: build/icon.png
 files:
   - dist/**/*
+  - dist-server/**/*
   - server/**/*
   - electron/**/*
   - build/icon.png
+  - build/icon.ico
   - public/music-note.png
   - public/favicon.svg
   - package.json
   - node_modules/**/*
 asar: true
 asarUnpack:
-  - dist/**/*
-  - server/**/*
-  - electron/**/*
-  - node_modules/tsx/**/*
-  - node_modules/esbuild/**/*
+  # Native optional bits only — server runs from asar as bundled ESM
+  - node_modules/@napi-rs/**/*
   - node_modules/@esbuild/**/*
-  - node_modules/@esbuild/**/**
 extraMetadata:
   main: electron/main.cjs
 win:
-  icon: build/icon.png
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:

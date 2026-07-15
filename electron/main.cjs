@@ -1,22 +1,21 @@
 /**
- * Prismatic Electron shell — starts the local production server, then opens a window.
- *
- * Music + playlists: %USERPROFILE%\Music\Prismatic (same as local web).
+ * Prismatic Electron shell.
+ * Starts the production server in-process (no child Electron/Node process),
+ * then opens the BrowserWindow. Fixes packaged boot + Task Manager icon.
  */
 const {app, BrowserWindow, Menu, shell, dialog, nativeImage} = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const {spawn} = require("node:child_process");
 const http = require("node:http");
 const os = require("node:os");
+const {pathToFileURL} = require("node:url");
 
 const PORT = Number(process.env.PRISMATIC_PORT || 4188);
 const HOST = "127.0.0.1";
 
-/** @type {import('node:child_process').ChildProcess | null} */
-let serverProcess = null;
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
+let serverStarted = false;
 
 function logPath() {
   try {
@@ -36,22 +35,10 @@ function logLine(message) {
   console.error(message);
 }
 
-/** App resources (package.json, dist, public) — may be inside app.asar */
+/** Package root (app.asar when packaged). */
 function appRoot() {
   if (app.isPackaged) return app.getAppPath();
   return path.resolve(__dirname, "..");
-}
-
-/**
- * Unpacked tree for running the Node server (tsx + server TS sources).
- * dist still loaded via PRISMATIC_APP_ROOT → asar.
- */
-function serverRoot() {
-  const base = appRoot();
-  if (app.isPackaged && base.includes("app.asar")) {
-    return base.replace("app.asar", "app.asar.unpacked");
-  }
-  return base;
 }
 
 function sharedLibraryRoot() {
@@ -63,14 +50,12 @@ function sharedLibraryRoot() {
 }
 
 function resolveAppIcon() {
-  const candidates = [
-    path.join(appRoot(), "build", "icon.png"),
-    path.join(appRoot(), "build", "icon.ico"),
-    path.join(serverRoot(), "build", "icon.png"),
-    path.join(appRoot(), "public", "favicon.svg"),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
+  const roots = [appRoot(), path.resolve(__dirname, "..")];
+  const names = ["build/icon.ico", "build/icon.png", "public/favicon.svg"];
+  for (const root of roots) {
+    for (const name of names) {
+      const candidate = path.join(root, name);
+      if (!fs.existsSync(candidate)) continue;
       try {
         const image = nativeImage.createFromPath(candidate);
         if (!image.isEmpty()) return image;
@@ -82,7 +67,7 @@ function resolveAppIcon() {
   return undefined;
 }
 
-function waitForHealth(timeoutMs = 60000) {
+function waitForHealth(timeoutMs = 45000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {
@@ -95,7 +80,7 @@ function waitForHealth(timeoutMs = 60000) {
         retry();
       });
       req.on("error", retry);
-      req.setTimeout(2000, () => {
+      req.setTimeout(1500, () => {
         req.destroy();
         retry();
       });
@@ -105,72 +90,49 @@ function waitForHealth(timeoutMs = 60000) {
         reject(new Error(`Server did not become ready within ${timeoutMs}ms. See log: ${logPath()}`));
         return;
       }
-      setTimeout(tick, 200);
+      setTimeout(tick, 150);
     };
     tick();
   });
 }
 
-function startServer() {
+/**
+ * Load bundled server in this process (single Prismatic.exe — correct taskbar/Task Manager icon).
+ */
+async function startServerInProcess() {
+  if (serverStarted) return;
   const resources = appRoot();
-  const runtime = serverRoot();
   const dataDir = sharedLibraryRoot();
   const musicDir = process.env.PRISMATIC_MUSIC_DIR
     ? path.resolve(process.env.PRISMATIC_MUSIC_DIR)
     : dataDir;
 
-  const env = {
-    ...process.env,
-    ELECTRON_RUN_AS_NODE: "1",
-    NODE_ENV: "production",
-    PRISMATIC_LOCAL: "1",
-    PORT: String(PORT),
-    HOST,
-    PRISMATIC_DATA_DIR: dataDir,
-    PRISMATIC_MUSIC_DIR: musicDir,
-    /** Static SPA + public assets live here (asar-safe). */
-    PRISMATIC_APP_ROOT: resources,
-  };
+  process.env.NODE_ENV = "production";
+  process.env.PRISMATIC_LOCAL = "1";
+  process.env.PORT = String(PORT);
+  process.env.HOST = HOST;
+  process.env.PRISMATIC_DATA_DIR = dataDir;
+  process.env.PRISMATIC_MUSIC_DIR = musicDir;
+  process.env.PRISMATIC_APP_ROOT = resources;
 
-  const bootstrap = path.join(runtime, "electron", "bootstrap.mjs");
-  const fallbackTsx = path.join(runtime, "node_modules", "tsx", "dist", "cli.mjs");
-  const serverEntry = path.join(runtime, "server", "index.ts");
-
-  let args;
-  if (fs.existsSync(bootstrap)) {
-    args = [bootstrap];
-    logLine(`Starting server via bootstrap: ${bootstrap}`);
-  } else {
-    let tsxCli = fallbackTsx;
-    try {
-      tsxCli = require.resolve("tsx/cli");
-    } catch {
-      // use fallback
-    }
-    args = [tsxCli, serverEntry];
-    logLine(`Starting server via tsx: ${tsxCli} ${serverEntry}`);
+  const candidates = [
+    path.join(resources, "dist-server", "index.mjs"),
+    path.join(path.resolve(__dirname, ".."), "dist-server", "index.mjs"),
+  ];
+  const entry = candidates.find((p) => fs.existsSync(p));
+  if (!entry) {
+    throw new Error(
+      `Server bundle missing (dist-server/index.mjs). Rebuild with pnpm electron:build.\nLooked in:\n${candidates.join("\n")}`,
+    );
   }
 
-  logLine(`appRoot=${resources} serverRoot=${runtime} music=${musicDir}`);
+  logLine(`Loading server bundle: ${entry}`);
+  logLine(`appRoot=${resources} music=${musicDir}`);
 
-  serverProcess = spawn(process.execPath, args, {
-    cwd: runtime,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-
-  serverProcess.stdout?.on("data", (chunk) => logLine(`[server] ${chunk.toString().trimEnd()}`));
-  serverProcess.stderr?.on("data", (chunk) => logLine(`[server:err] ${chunk.toString().trimEnd()}`));
-
-  serverProcess.on("exit", (code, signal) => {
-    logLine(`Server exited code=${code} signal=${signal}`);
-    serverProcess = null;
-  });
-
-  serverProcess.on("error", (error) => {
-    logLine(`Server spawn error: ${error.message}`);
-  });
+  // ESM dynamic import works from CJS main under Electron/Node 20+
+  await import(pathToFileURL(entry).href);
+  serverStarted = true;
+  logLine("Server module loaded");
 }
 
 function createWindow() {
@@ -183,6 +145,7 @@ function createWindow() {
     backgroundColor: "#05070c",
     autoHideMenuBar: true,
     icon,
+    title: "Prismatic",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -192,13 +155,15 @@ function createWindow() {
   });
 
   Menu.setApplicationMenu(null);
+  if (process.platform === "win32" && icon) {
+    app.setAppUserModelId("app.prismatic.desktop");
+  }
 
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.webContents.setWindowOpenHandler(({url}) => {
     void shell.openExternal(url);
     return {action: "deny"};
   });
-
   mainWindow.webContents.on("did-fail-load", (_e, code, desc) => {
     logLine(`Window failed to load: ${code} ${desc}`);
   });
@@ -213,14 +178,16 @@ async function boot() {
     // ignore
   }
   logLine("Boot start");
-  startServer();
   try {
+    await startServerInProcess();
     await waitForHealth();
     logLine("Health OK");
     createWindow();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : "";
     logLine(`Boot failed: ${message}`);
+    if (stack) logLine(stack);
     dialog.showErrorBox(
       "Prismatic failed to start",
       `${message}\n\nLog file:\n${logPath()}`,
@@ -229,26 +196,26 @@ async function boot() {
   }
 }
 
-app.whenReady().then(() => {
-  void boot();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void boot();
+// Single-instance lock so double-click reuses the same process/icon
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
-});
+
+  app.whenReady().then(() => {
+    void boot();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) void boot();
+    });
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
-});
-
-app.on("before-quit", () => {
-  if (serverProcess && !serverProcess.killed) {
-    try {
-      serverProcess.kill();
-    } catch {
-      // ignore
-    }
-  }
 });

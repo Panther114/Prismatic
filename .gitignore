@@ -4,6 +4,7 @@ node_modules/
 
 # Build output
 dist/
+dist-server/
 .out/
 release/
 # Keep build/icon.* for Electron; ignore other build junk

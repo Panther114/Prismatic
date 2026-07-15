@@ -16,8 +16,9 @@
     "check": "pnpm typecheck && pnpm build",
     "prepare:sample": "tsx scripts/prepare-sample.ts",
     "render:sample": "tsx scripts/render-sample.ts",
-    "electron:dev": "pnpm build && cross-env NODE_ENV=production PRISMATIC_LOCAL=1 electron .",
-    "electron:build": "pnpm build && electron-builder --win nsis --config electron-builder.yml",
+    "build:server": "node scripts/build-server.mjs",
+    "electron:dev": "pnpm build && pnpm build:server && cross-env NODE_ENV=production PRISMATIC_LOCAL=1 electron .",
+    "electron:build": "pnpm build && pnpm build:server && electron-builder --win nsis --config electron-builder.yml",
     "dist:win": "pnpm electron:build"
   },
   "dependencies": {
