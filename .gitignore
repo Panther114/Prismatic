@@ -7,10 +7,11 @@ dist/
 dist-server/
 .out/
 release/
-# Keep build/icon.* for Electron; ignore other build junk
+# Keep Electron packaging assets in build/; ignore other build junk
 build/*
 !build/icon.png
 !build/icon.ico
+!build/installer.nsh
 *.tsbuildinfo
 
 # Prismatic local state & user data
