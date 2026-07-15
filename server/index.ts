@@ -29,7 +29,18 @@ const server = createHttpServer(app);
 
 app.use(express.json({limit: "256kb"}));
 
-app.get("/api/health", (_request, response) => {
+app.get("/api/health", async (_request, response) => {
+  const distIndex = path.join(root, "dist", "index.html");
+  let distOk = false;
+  let distMarker = "";
+  try {
+    const html = await fs.readFile(distIndex, "utf8");
+    distOk = true;
+    const m = html.match(/assets\/index-[^"]+\.js/);
+    distMarker = m?.[0] || "index.html";
+  } catch {
+    distOk = false;
+  }
   response.json({
     ok: true,
     name: "Prismatic",
@@ -37,6 +48,11 @@ app.get("/api/health", (_request, response) => {
     mode: localFeatures ? "local" : "cloud",
     /** Clients always export video in-browser. */
     clientExport: true,
+    version: process.env.PRISMATIC_APP_VERSION || process.env.npm_package_version || null,
+    desktop: process.env.PRISMATIC_DESKTOP === "1",
+    appRoot: root,
+    distOk,
+    distMarker,
   });
 });
 
@@ -387,10 +403,23 @@ if (localFeatures) {
 
 if (isProduction) {
   const dist = path.join(root, "dist");
-  app.use(express.static(dist, {fallthrough: true, maxAge: "1h"}));
+  // Desktop must never serve a year-old shell; disable long-lived HTML caching.
+  app.use(express.static(dist, {
+    fallthrough: true,
+    maxAge: process.env.PRISMATIC_DESKTOP === "1" ? 0 : "1h",
+    setHeaders(res, filePath) {
+      if (filePath.endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      } else if (process.env.PRISMATIC_DESKTOP === "1") {
+        // Hashed assets are fine to cache briefly; still short on desktop upgrades
+        res.setHeader("Cache-Control", "public, max-age=60");
+      }
+    },
+  }));
   app.use((request, response, next) => {
     if (request.method !== "GET" && request.method !== "HEAD") return next();
     if (request.path.startsWith("/api/")) return next();
+    response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     response.sendFile(path.join(dist, "index.html"), (error) => {
       if (error) next(error);
     });

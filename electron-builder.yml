@@ -3,7 +3,8 @@ appId: app.prismatic.desktop
 productName: Prismatic
 copyright: Copyright © Prismatic
 directories:
-  output: release
+  # Separate folder avoids Windows EPERM locks on release/win-unpacked from prior runs
+  output: release-build
   buildResources: build
 # Distinct filename so a new build is never confused with an old Setup 1.0.0.exe
 artifactName: "${productName}-Setup-${version}-${os}-${arch}.${ext}"
@@ -19,7 +20,12 @@ files:
   - package.json
   - node_modules/**/*
 asar: true
+# CRITICAL: Express serves SPA from real files. Keeping dist inside asar caused
+# upgrades to look "stuck" when combined with Chromium service-worker cache.
 asarUnpack:
+  - dist/**/*
+  - dist-server/**/*
+  - build/**/*
   - node_modules/@napi-rs/**/*
   - node_modules/@esbuild/**/*
 extraMetadata:

@@ -8,7 +8,7 @@ import {fileURLToPath} from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
 const version = pkg.version;
-const releaseDir = path.join(root, "release");
+const releaseDir = path.join(root, "release-build");
 
 const entries = await fs.readdir(releaseDir).catch(() => []);
 const installer = entries.find((name) =>
@@ -46,12 +46,36 @@ const markers = [
   version, // injected __APP_VERSION__
 ];
 
-for (const marker of markers) {
-  if (!text.includes(marker)) {
-    console.error(`FAIL: app.asar missing marker "${marker}"`);
+// Markers may live in asar or asar.unpacked (dist is unpacked for Express).
+const unpackedDir = path.join(releaseDir, "win-unpacked", "resources", "app.asar.unpacked");
+let searchText = text;
+try {
+  const distIndex = await fs.readFile(path.join(unpackedDir, "dist", "index.html"), "utf8");
+  searchText += `\n${distIndex}`;
+  console.log(`OK unpacked dist/index.html:\n${distIndex.trim()}`);
+  // Also scan main JS bundle on disk
+  const assets = await fs.readdir(path.join(unpackedDir, "dist", "assets"));
+  const mainJs = assets.find((n) => /^index-.*\.js$/.test(n));
+  if (mainJs) {
+    const js = await fs.readFile(path.join(unpackedDir, "dist", "assets", mainJs), "utf8");
+    searchText += js;
+    console.log(`OK unpacked SPA bundle: ${mainJs} (${(js.length / 1024).toFixed(0)} KB)`);
+  } else {
+    console.error("FAIL: no index-*.js under app.asar.unpacked/dist/assets");
     process.exit(1);
   }
-  console.log(`OK asar contains: ${marker}`);
+} catch (error) {
+  console.error("FAIL: dist not unpacked to app.asar.unpacked/dist — Express/desktop will break or stale-cache");
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+}
+
+for (const marker of markers) {
+  if (!searchText.includes(marker)) {
+    console.error(`FAIL: package missing marker "${marker}"`);
+    process.exit(1);
+  }
+  console.log(`OK package contains: ${marker}`);
 }
 
 // Guard against shipping the old fixed name
