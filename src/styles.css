@@ -41,7 +41,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .sidebar, .inspector { min-height: 0; background: linear-gradient(145deg, #0b1018 0%, #080b11 100%); }
 .sidebar { position: relative; z-index: 5; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
 .brand-row { height: 52px; flex: 0 0 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line-soft); }
-.brand { font-family: "Barlow Condensed", sans-serif; font-size: 16px; font-weight: 600; letter-spacing: .28em; }
+.brand { display: flex; align-items: baseline; gap: 8px; font-family: "Barlow Condensed", sans-serif; font-size: 16px; font-weight: 600; letter-spacing: .28em; }
+.brand-version { font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 400; letter-spacing: .04em; color: #6a7382; }
 .brand-menu { color: #737b88; }
 .mobile-close { display: none; }
 

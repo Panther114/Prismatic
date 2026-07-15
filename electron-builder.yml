@@ -1,11 +1,12 @@
-# Desktop packaging only — not used on Railway / web deploy.
+# Desktop packaging — production NSIS installer/uninstaller
 appId: app.prismatic.desktop
 productName: Prismatic
 copyright: Copyright © Prismatic
 directories:
   output: release
   buildResources: build
-icon: build/icon.png
+# Distinct filename so a new build is never confused with an old Setup 1.0.0.exe
+artifactName: "${productName}-Setup-${version}-${os}-${arch}.${ext}"
 files:
   - dist/**/*
   - dist-server/**/*
@@ -19,7 +20,6 @@ files:
   - node_modules/**/*
 asar: true
 asarUnpack:
-  # Native optional bits only — server runs from asar as bundled ESM
   - node_modules/@napi-rs/**/*
   - node_modules/@esbuild/**/*
 extraMetadata:
@@ -31,9 +31,18 @@ win:
       arch:
         - x64
 nsis:
-  oneClick: true
+  # Multi-step wizard (not silent one-click) — welcome, path, progress, finish
+  oneClick: false
   perMachine: false
-  allowToChangeInstallationDirectory: false
-  createDesktopShortcut: true
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: Prismatic
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  include: build/installer.nsh
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  uninstallDisplayName: Prismatic

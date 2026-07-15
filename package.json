@@ -1,7 +1,8 @@
 {
   "name": "prismatic",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
+  "author": "Prismatic",
   "description": "Prismatic — cinematic music visualizer & player. Browser-side export keeps the host lightweight.",
   "type": "module",
   "main": "electron/main.cjs",
@@ -19,7 +20,8 @@
     "build:server": "node scripts/build-server.mjs",
     "electron:dev": "pnpm build && pnpm build:server && cross-env NODE_ENV=production PRISMATIC_LOCAL=1 electron .",
     "electron:build": "pnpm build && pnpm build:server && electron-builder --win nsis --config electron-builder.yml",
-    "dist:win": "pnpm electron:build"
+    "dist:win": "pnpm electron:build && node scripts/verify-installer.mjs",
+    "verify:installer": "node scripts/verify-installer.mjs"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.2.8",

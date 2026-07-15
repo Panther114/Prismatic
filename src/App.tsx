@@ -983,7 +983,10 @@ export default function App() {
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="brand-row">
           <button className="mobile-close" onClick={() => setSidebarOpen(false)} aria-label="Close navigation"><X size={18} /></button>
-          <div className="brand">PRISMATIC</div>
+          <div className="brand" title={`Prismatic v${typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "?"}`}>
+            PRISMATIC
+            <span className="brand-version">{typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : ""}</span>
+          </div>
           <Menu size={16} className="brand-menu" />
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
