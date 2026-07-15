@@ -13,7 +13,7 @@ import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
 import {playlistStore} from "./lib/playlists";
-import {loadPlayerPrefs, savePlayerPrefs} from "./lib/playerPrefs";
+import {loadPlayerPrefs, loadPlayerPrefsLocal, savePlayerPrefs} from "./lib/playerPrefs";
 import {
   createQueue,
   currentId,
@@ -97,11 +97,13 @@ export default function App() {
     trackTitle?: string;
     onConfirm?: () => void | Promise<void>;
   }>(null);
-  const initialPrefs = useMemo(() => loadPlayerPrefs(), []);
+  // Seed from localStorage only; disk prefs load once local mode is known.
+  const initialPrefs = useMemo(() => loadPlayerPrefsLocal(), []);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(initialPrefs.volume);
   const [muted, setMuted] = useState(initialPrefs.muted);
+  const offlineModeRef = useRef<"local" | "cloud">("cloud");
   const [waveform, setWaveform] = useState<number[]>([]);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -145,7 +147,13 @@ export default function App() {
     );
   }, [tracks, libraryQuery]);
 
-  const mergeTracks = useCallback((serverTracks: Track[]) => {
+  /**
+   * Offline local/desktop: disk library is the only source of truth.
+   * Cloud (Railway): merge browser IndexedDB imports.
+   * Never mix browser-only blob tracks into local mode — they desync from Electron.
+   */
+  const mergeTracks = useCallback((serverTracks: Track[], modeCloud: boolean) => {
+    if (!modeCloud) return [...serverTracks];
     const local = clientLibrary.list();
     const byId = new Map<string, Track>();
     for (const track of serverTracks) byId.set(track.id, track);
@@ -154,25 +162,34 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
-    await clientLibrary.hydrate().catch(() => undefined);
     const health = await api.health().catch(() => null);
-    // Prefer explicit health.mode; fall back to empty local APIs.
-    let modeCloud = health?.mode === "cloud";
+    // Desktop / local Node always offline-disk; never treat as cloud.
+    let modeCloud = health?.mode === "cloud" && health?.desktop !== true;
+    if (health?.mode === "local") modeCloud = false;
     cloudModeRef.current = modeCloud;
+    offlineModeRef.current = modeCloud ? "cloud" : "local";
     setCloudMode(modeCloud);
+
+    // Only hydrate browser-only library in true cloud mode
+    if (modeCloud) {
+      await clientLibrary.hydrate().catch(() => undefined);
+    }
 
     let serverTracks: Track[] = [];
     if (!modeCloud) {
       try {
         serverTracks = await api.tracks();
       } catch {
+        // Only fall back to cloud if we truly have no local API
         modeCloud = true;
         cloudModeRef.current = true;
+        offlineModeRef.current = "cloud";
         setCloudMode(true);
+        await clientLibrary.hydrate().catch(() => undefined);
       }
     }
     playlistStore.setMode(modeCloud ? "cloud" : "local");
-    const nextTracks = mergeTracks(serverTracks);
+    const nextTracks = mergeTracks(serverTracks, modeCloud);
     setTracks(nextTracks);
     setSelectedId((current) => {
       if (current && nextTracks.some((track) => track.id === current)) return current;
@@ -185,6 +202,21 @@ export default function App() {
         {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library"},
       );
     });
+
+    // Shared offline prefs (disk) for local web + Electron
+    try {
+      const prefs = await loadPlayerPrefs(modeCloud ? "cloud" : "local");
+      setVolume(prefs.volume);
+      setMuted(prefs.muted);
+      setQueue((q) => ({
+        ...q,
+        shuffle: prefs.shuffle,
+        repeat: prefs.repeat,
+      }));
+    } catch {
+      // keep seeded prefs
+    }
+
     try {
       const list = await playlistStore.load();
       setPlaylists(list);
@@ -195,11 +227,13 @@ export default function App() {
       const meta = await api.libraryMeta();
       setWatchFolders(meta.watchFolders || []);
       if (meta.musicDirectory) setMusicDirectory(meta.musicDirectory);
+      else if (meta.offlineRoot) setMusicDirectory(meta.offlineRoot);
       libraryGenerationRef.current = meta.generation;
-      if (meta.mode === "cloud") {
-        cloudModeRef.current = true;
-        setCloudMode(true);
-        playlistStore.setMode("cloud");
+      if (meta.mode === "local") {
+        cloudModeRef.current = false;
+        offlineModeRef.current = "local";
+        setCloudMode(false);
+        playlistStore.setMode("local");
       }
     } catch {
       // Watch UI optional.
@@ -234,10 +268,11 @@ export default function App() {
           libraryGenerationRef.current = meta.generation;
           setWatchFolders(meta.watchFolders);
           return api.tracks().then((nextTracks) => {
-            setTracks(mergeTracks(nextTracks));
+            const merged = mergeTracks(nextTracks, cloudModeRef.current);
+            setTracks(merged);
             setSelectedId((current) => {
-              if (current && (nextTracks.some((track) => track.id === current) || clientLibrary.list().some((t) => t.id === current))) return current;
-              return mergeTracks(nextTracks)[0]?.id || "";
+              if (current && merged.some((track) => track.id === current)) return current;
+              return merged[0]?.id || "";
             });
           });
         })
@@ -306,7 +341,7 @@ export default function App() {
   }, [volume, muted]);
 
   useEffect(() => {
-    savePlayerPrefs({
+    void savePlayerPrefs(offlineModeRef.current, {
       shuffle: queue.shuffle,
       repeat: queue.repeat,
       volume,
@@ -421,19 +456,20 @@ export default function App() {
   }, [goToTrack, selectedId]);
 
   const playQueue = useCallback((trackIds: string[], options: {shuffle?: boolean; startId?: string; sourceLabel?: string; autoplay?: boolean} = {}) => {
-    const prefs = loadPlayerPrefs();
-    const next = createQueue(trackIds, {
-      shuffle: options.shuffle ?? prefs.shuffle,
-      repeat: prefs.repeat,
-      startId: options.startId || trackIds[0],
-      sourceLabel: options.sourceLabel || "Library",
+    setQueue((q) => {
+      const next = createQueue(trackIds, {
+        shuffle: options.shuffle ?? q.shuffle,
+        repeat: q.repeat,
+        startId: options.startId || trackIds[0],
+        sourceLabel: options.sourceLabel || "Library",
+      });
+      const id = currentId(next);
+      if (id) {
+        if (options.autoplay !== false) playAfterLoadRef.current = true;
+        setSelectedId(id);
+      }
+      return next;
     });
-    setQueue(next);
-    const id = currentId(next);
-    if (id) {
-      if (options.autoplay !== false) playAfterLoadRef.current = true;
-      setSelectedId(id);
-    }
   }, []);
 
   const selectAdjacent = (offset: number) => {
@@ -514,7 +550,7 @@ export default function App() {
         try {
           // Server multer clones files into the shared music library.
           const serverTracks = await api.importAudio(files);
-          all = mergeTracks(serverTracks);
+          all = mergeTracks(serverTracks, false);
         } catch {
           // Cloud or restricted host — keep audio only in the browser.
           cloudModeRef.current = true;
@@ -563,7 +599,7 @@ export default function App() {
     setError("");
     try {
       const result = await api.importFolder(trimmed, folderDepth);
-      setTracks(mergeTracks(result.tracks));
+      setTracks(mergeTracks(result.tracks, false));
       if (result.musicDirectory) setMusicDirectory(result.musicDirectory);
       const n = result.imported.length;
       if (!n && result.skipped) {
@@ -798,7 +834,7 @@ export default function App() {
         // Also drop browser duplicate if present
         clientLibrary.remove(trackId);
       }
-      const nextTracks = mergeTracks(serverTracks);
+      const nextTracks = mergeTracks(serverTracks, cloudModeRef.current);
       setTracks(nextTracks);
       setQueue((q) => removeTrackFromQueue(q, trackId));
       const stripped = await playlistStore.stripTrack(trackId);
@@ -1156,8 +1192,8 @@ export default function App() {
               <h1>Add audio.</h1>
               <p>
                 {cloudMode
-                  ? "Files stay in this browser session (and offline cache)."
-                  : "Imports are copied into your shared library — originals can be deleted afterward."}
+                  ? "Cloud host: audio stays offline in this browser only (not shared with the desktop app)."
+                  : "Imports are copied into your offline library on this PC — same folder for local web + desktop. Originals can be deleted afterward."}
                 {" · "}MP3, WAV, FLAC, M4A, AAC, OGG, Opus
               </p>
             </div>
@@ -1251,7 +1287,10 @@ export default function App() {
                     <FolderOpen size={14} />
                     <span className="track-copy">
                       <strong>Shared library</strong>
-                      <small>{musicDirectory || "%USERPROFILE%\\Music\\Prismatic"} · web + desktop</small>
+                      <small>
+                        {musicDirectory || "%USERPROFILE%\\Music\\Prismatic"}
+                        {" · offline only · shared by local web + desktop"}
+                      </small>
                     </span>
                   </li>
                   {watchFolders.map((folder) => (

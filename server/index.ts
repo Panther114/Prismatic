@@ -59,10 +59,11 @@ app.get("/api/health", async (_request, response) => {
 if (localFeatures) {
   const {MusicLibrary} = await import("./library.js");
   const {PlaylistRepository} = await import("./playlists.js");
+  const {PlayerPrefsRepository} = await import("./playerPrefs.js");
   const {migrateProjectLibraryToShared, resolveLibraryPaths} = await import("./sharedPaths.js");
   const multer = (await import("multer")).default;
 
-  // Same default paths for `pnpm dev`, `pnpm start`, and Electron (see sharedPaths.ts).
+  // Offline-only user library (web local + Electron share this folder).
   const paths = resolveLibraryPaths(root);
   const {musicDirectory, stateDirectory, outputDirectory, dataRoot} = paths;
 
@@ -77,6 +78,7 @@ if (localFeatures) {
 
   const library = new MusicLibrary(root, musicDirectory, stateDirectory);
   const playlists = new PlaylistRepository(stateDirectory);
+  const playerPrefs = new PlayerPrefsRepository(stateDirectory);
 
   const safeMusicFileName = (original: string) => {
     const base = path.basename(original).replace(/[^\p{L}\p{N}._ -]+/gu, "-") || `audio-${Date.now()}.mp3`;
@@ -120,11 +122,30 @@ if (localFeatures) {
         watchFolders: await library.getWatchFolders(),
         musicDirectory,
         dataRoot,
+        offlineRoot: dataRoot,
         mode: "local",
         clientExport: true,
-        /** Web + Electron share this folder by default. */
+        /** All durable data is offline on this machine (disk). */
+        offlineOnly: true,
+        /** Local web + Electron share Music/Prismatic. */
         sharedLibrary: true,
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/player-prefs", async (_request, response, next) => {
+    try {
+      response.json(await playerPrefs.read());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put("/api/player-prefs", async (request, response, next) => {
+    try {
+      response.json(await playerPrefs.write(request.body || {}));
     } catch (error) {
       next(error);
     }

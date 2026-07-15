@@ -29,6 +29,11 @@ export type HealthInfo = {
   mode: "local" | "cloud";
   clientExport: boolean;
   port?: number;
+  desktop?: boolean;
+  version?: string | null;
+  distOk?: boolean;
+  distMarker?: string;
+  appRoot?: string;
 };
 
 export type LibraryMeta = {
@@ -36,9 +41,18 @@ export type LibraryMeta = {
   watchFolders: WatchFolder[];
   musicDirectory: string;
   dataRoot?: string;
+  offlineRoot?: string;
   mode?: "local" | "cloud";
   clientExport?: boolean;
   sharedLibrary?: boolean;
+  offlineOnly?: boolean;
+};
+
+export type PlayerPrefsDto = {
+  shuffle: boolean;
+  repeat: "off" | "all" | "one";
+  volume: number;
+  muted: boolean;
 };
 
 export const api = {
@@ -82,6 +96,13 @@ export const api = {
     body: JSON.stringify({trackId, ...settings}),
   }),
   openOutput: () => fetch("/api/open-output", {method: "POST"}),
+  playerPrefs: () => json<PlayerPrefsDto>("/api/player-prefs"),
+  savePlayerPrefs: (prefs: PlayerPrefsDto) =>
+    json<PlayerPrefsDto>("/api/player-prefs", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(prefs),
+    }),
   playlists: () => json<Playlist[]>("/api/playlists"),
   createPlaylist: (body: {name: string; trackIds?: string[]}) =>
     json<Playlist>("/api/playlists", {

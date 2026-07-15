@@ -24,7 +24,11 @@ function readLocal(): Playlist[] {
 }
 
 function writeLocal(list: Playlist[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // ignore
+  }
 }
 
 export class PlaylistStore {
@@ -43,13 +47,31 @@ export class PlaylistStore {
     return this.cache.find((p) => p.id === id) || null;
   }
 
+  /**
+   * Local/desktop: disk is source of truth (Music/Prismatic/.prismatic/playlists.json).
+   * One-time: migrate any browser localStorage playlists onto disk if disk is empty.
+   */
   async load() {
     if (this.mode === "local") {
       try {
-        this.cache = await api.playlists();
+        let disk = await api.playlists();
+        const browser = readLocal();
+        if (disk.length === 0 && browser.length > 0) {
+          for (const pl of browser) {
+            try {
+              await api.createPlaylist({name: pl.name, trackIds: pl.trackIds});
+            } catch {
+              // ignore individual failures
+            }
+          }
+          disk = await api.playlists();
+          // Clear origin-local copy so we don't re-migrate forever
+          writeLocal([]);
+        }
+        this.cache = disk;
         return this.list();
       } catch {
-        // Fall through to localStorage if API unavailable
+        // Fall through to localStorage only if API is down
       }
     }
     this.cache = readLocal();
@@ -61,7 +83,7 @@ export class PlaylistStore {
     if (this.mode === "local") {
       try {
         const created = await api.createPlaylist({name: trimmed, trackIds});
-        this.cache = [...this.cache.filter((p) => p.id !== created.id), created];
+        this.cache = await api.playlists();
         return created;
       } catch {
         // local fallback
@@ -83,7 +105,7 @@ export class PlaylistStore {
     if (this.mode === "local") {
       try {
         const updated = await api.updatePlaylist(id, patch);
-        this.cache = this.cache.map((p) => (p.id === id ? updated : p));
+        this.cache = await api.playlists();
         return updated;
       } catch {
         // local fallback
@@ -116,7 +138,6 @@ export class PlaylistStore {
     return this.list();
   }
 
-  /** Drop a track id from every playlist (library remove). */
   async stripTrack(trackId: string) {
     const previous = this.cache;
     const next = previous.map((p) => {
@@ -145,20 +166,6 @@ export class PlaylistStore {
       writeLocal(this.cache);
     }
     return this.list();
-  }
-
-  async addTracks(playlistId: string, trackIds: string[]) {
-    const pl = this.get(playlistId);
-    if (!pl) return null;
-    const set = new Set(pl.trackIds);
-    const merged = [...pl.trackIds];
-    for (const id of trackIds) {
-      if (!set.has(id)) {
-        set.add(id);
-        merged.push(id);
-      }
-    }
-    return this.update(playlistId, {trackIds: merged});
   }
 }
 
