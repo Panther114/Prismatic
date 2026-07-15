@@ -1,8 +1,11 @@
-# Lightweight Node host — no ffmpeg, no native canvas, no GPU.
+# Lightweight Railway host — SPA + Express only (no ffmpeg, no Electron, no Caddy).
+providers = ["node"]
+
 [phases.setup]
 nixPkgs = ["nodejs_22", "pnpm"]
 
 [phases.install]
+# Install is owned here; do not re-run in buildCommand (avoids double work).
 cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]

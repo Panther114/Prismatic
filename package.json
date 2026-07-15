@@ -49,50 +49,15 @@
   "optionalDependencies": {
     "@napi-rs/canvas": "^0.1.80"
   },
-  "build": {
-    "appId": "app.prismatic.desktop",
-    "productName": "Prismatic",
-    "copyright": "Copyright © Prismatic",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "server/**/*",
-      "electron/**/*",
-      "public/music-note.png",
-      "public/favicon.svg",
-      "package.json",
-      "node_modules/**/*"
-    ],
-    "asar": true,
-    "asarUnpack": [
-      "server/**/*",
-      "node_modules/tsx/**/*",
-      "node_modules/esbuild/**/*",
-      "node_modules/@esbuild/**/*"
-    ],
-    "extraMetadata": {
-      "main": "electron/main.cjs"
-    },
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Prismatic"
-    }
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@esbuild/linux-x64",
+      "@esbuild/darwin-arm64",
+      "@esbuild/darwin-x64",
+      "@esbuild/win32-x64",
+      "@napi-rs/canvas"
+    ]
   },
   "packageManager": "pnpm@11.7.0"
 }

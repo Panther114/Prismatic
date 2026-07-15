@@ -1,0 +1,14 @@
+# Keep Railway / Docker context small
+node_modules
+release
+dist
+.git
+.prismatic
+music
+output
+remotion
+hyperframes
+*.mp4
+*.webm
+*.md
+!README.md
