@@ -1,6 +1,11 @@
 /**
- * Bundle the Express server for Electron (no tsx at runtime).
- * Output: dist-server/index.mjs — local sources bundled, node_modules external.
+ * Bundle the Express server for Electron into a single ESM file.
+ *
+ * IMPORTANT: Do NOT leave npm packages external. When dist-server is
+ * asarUnpacked, Node cannot resolve packages that only live inside app.asar
+ * (e.g. "Cannot find package 'music-metadata'").
+ *
+ * Only native / optional binaries stay external.
  */
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
@@ -9,7 +14,6 @@ import {promises as fs} from "node:fs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(root, "package.json"));
-// esbuild is nested under vite in pnpm; resolve via vite's install graph
 const viteDir = path.dirname(require.resolve("vite/package.json"));
 const esbuildPath = require.resolve("esbuild", {paths: [viteDir, root]});
 const esbuild = await import(pathToFileURL(esbuildPath).href);
@@ -24,9 +28,39 @@ await esbuild.build({
   format: "esm",
   target: "node20",
   outfile,
-  packages: "external",
+  // Bundle express, music-metadata, multer, etc. into one file.
+  packages: "bundle",
+  external: [
+    "electron",
+    "vite",
+    // optional native canvases / platform binaries
+    "@napi-rs/canvas",
+    "@napi-rs/canvas-*",
+    "fsevents",
+  ],
+  // Allow marked external packages to stay external even if nested
   sourcemap: true,
   logLevel: "info",
+  banner: {
+    js: `
+import { createRequire as __prismaticCreateRequire } from 'node:module';
+import { fileURLToPath as __prismaticFileURLToPath } from 'node:url';
+import { dirname as __prismaticDirname } from 'node:path';
+const require = __prismaticCreateRequire(import.meta.url);
+const __filename = __prismaticFileURLToPath(import.meta.url);
+const __dirname = __prismaticDirname(__filename);
+`.trim(),
+  },
 });
 
-console.log(`Server bundle → ${outfile}`);
+// Sanity: music-metadata must not remain as a bare external import
+const code = await fs.readFile(outfile, "utf8");
+if (/from\s+["']music-metadata["']/.test(code) || /require\(["']music-metadata["']\)/.test(code)) {
+  console.error("FAIL: dist-server still imports music-metadata externally");
+  process.exit(1);
+}
+if (!code.includes("parseFile") && !code.includes("music-metadata") && !code.includes("parseBlob")) {
+  console.warn("WARN: bundle may not include music-metadata symbols (check manually)");
+}
+
+console.log(`Server bundle → ${outfile} (${(code.length / 1024).toFixed(0)} KB)`);

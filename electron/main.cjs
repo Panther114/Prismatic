@@ -209,8 +209,20 @@ async function startServerInProcess() {
     );
   }
 
+  // Help any residual external/native resolves find packages inside the asar.
+  const asarModules = path.join(app.getAppPath(), "node_modules");
+  if (fs.existsSync(asarModules)) {
+    process.env.NODE_PATH = [asarModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter);
+    try {
+      // Refresh CJS module paths (natives); ESM bundle should be self-contained.
+      require("module").Module._initPaths();
+    } catch {
+      // ignore
+    }
+  }
+
   logLine(`Loading server bundle: ${entry}`);
-  logLine(`appRoot=${resources} version=${version} music=${musicDir}`);
+  logLine(`appRoot=${resources} version=${version} music=${musicDir} nodePath=${process.env.NODE_PATH || ""}`);
 
   await import(pathToFileURL(entry).href);
   serverStarted = true;
