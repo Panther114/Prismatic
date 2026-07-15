@@ -1,15 +1,12 @@
-# Empty workspace root (keeps pnpm happy) + install policy for CI/Railway.
+# Workspace root + pnpm 10+/11 install policy (settings live here, not package.json).
 packages: []
 
-# Only these packages may run lifecycle scripts (skips Electron binary download).
-onlyBuiltDependencies:
-  - esbuild
-  - "@esbuild/linux-x64"
-  - "@esbuild/darwin-arm64"
-  - "@esbuild/darwin-x64"
-  - "@esbuild/win32-x64"
-  - "@napi-rs/canvas"
+# Do not fail CI when Electron (etc.) lifecycle scripts are skipped.
+strictDepBuilds: false
 
+# Explicit allow/deny for postinstall scripts (Electron must not download on Railway).
 allowBuilds:
   esbuild: true
   "@napi-rs/canvas": true
+  electron: false
+  electron-winstaller: false
