@@ -1,16 +1,32 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
   ArrowRight, Check, Clapperboard, CloudUpload, FolderOpen, FolderPlus, Library,
-  LoaderCircle, Menu, Music2, Pause, Play, Plus, Save, SkipBack, SkipForward, Square, Trash2, Volume2, X, AudioWaveform,
+  ListMusic, LoaderCircle, Menu, Music2, Plus, Save, Square, Trash2, X, AudioWaveform,
 } from "lucide-react";
 import {api} from "./api";
 import {VisualizerCanvas, type VisualizerCanvasHandle} from "./components/VisualizerCanvas";
 import {DiscPlayer} from "./components/DiscPlayer";
-import {WaveformSeek} from "./components/WaveformSeek";
+import {TransportBar} from "./components/TransportBar";
+import {PlaylistView} from "./components/PlaylistView";
 import {clientLibrary} from "./lib/clientLibrary";
-import {exportClientVideo} from "./lib/clientExport";
-import {buildRenderSettings, visualsFileName} from "./lib/resolutions";
-import type {RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
+import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
+import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
+import {playlistStore} from "./lib/playlists";
+import {loadPlayerPrefs, savePlayerPrefs} from "./lib/playerPrefs";
+import {
+  createQueue,
+  currentId,
+  cycleRepeat,
+  jumpTo,
+  onTrackEnded,
+  removeTrackFromQueue,
+  setRepeat,
+  setShuffle,
+  skipNext,
+  skipPrev,
+  type QueueState,
+} from "./lib/playbackQueue";
+import type {Playlist, RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
 
 const ACTIVE_STATUSES = new Set(["queued", "analyzing", "rendering"]);
 
@@ -72,11 +88,18 @@ export default function App() {
     trackTitle?: string;
     onConfirm?: () => void | Promise<void>;
   }>(null);
+  const initialPrefs = useMemo(() => loadPlayerPrefs(), []);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [volume, setVolume] = useState(0.86);
+  const [volume, setVolume] = useState(initialPrefs.volume);
+  const [muted, setMuted] = useState(initialPrefs.muted);
   const [waveform, setWaveform] = useState<number[]>([]);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [queue, setQueue] = useState<QueueState>(() =>
+    createQueue([], {shuffle: initialPrefs.shuffle, repeat: initialPrefs.repeat, sourceLabel: "Library"}),
+  );
+  const [autoplayNext, setAutoplayNext] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
@@ -88,6 +111,14 @@ export default function App() {
   const timeRafRef = useRef(0);
   const libraryGenerationRef = useRef(0);
   const cloudModeRef = useRef(false);
+  const waveformCacheRef = useRef(new Map<string, number[]>());
+  const lastVolumeRef = useRef(initialPrefs.volume || 0.86);
+  const queueRef = useRef(queue);
+  const prefetchRef = useRef<HTMLAudioElement | null>(null);
+  const playAfterLoadRef = useRef(false);
+  const ensureAudioGraphRef = useRef(async () => undefined as void);
+
+  queueRef.current = queue;
 
   const selected = useMemo(() => tracks.find((track) => track.id === selectedId) || tracks[0], [tracks, selectedId]);
   const activeJob = useMemo(() => jobs.find((job) => job.trackId === selected?.id && ACTIVE_STATUSES.has(job.status)), [jobs, selected?.id]);
@@ -103,6 +134,7 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    await clientLibrary.hydrate().catch(() => undefined);
     const health = await api.health().catch(() => null);
     // Prefer explicit health.mode; fall back to empty local APIs.
     let modeCloud = health?.mode === "cloud";
@@ -119,12 +151,26 @@ export default function App() {
         setCloudMode(true);
       }
     }
+    playlistStore.setMode(modeCloud ? "cloud" : "local");
     const nextTracks = mergeTracks(serverTracks);
     setTracks(nextTracks);
     setSelectedId((current) => {
       if (current && nextTracks.some((track) => track.id === current)) return current;
       return nextTracks[0]?.id || "";
     });
+    setQueue((q) => {
+      if (q.order.length) return q;
+      return createQueue(
+        nextTracks.map((t) => t.id),
+        {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library"},
+      );
+    });
+    try {
+      const list = await playlistStore.load();
+      setPlaylists(list);
+    } catch {
+      setPlaylists([]);
+    }
     try {
       const meta = await api.libraryMeta();
       setWatchFolders(meta.watchFolders || []);
@@ -132,6 +178,7 @@ export default function App() {
       if (meta.mode === "cloud") {
         cloudModeRef.current = true;
         setCloudMode(true);
+        playlistStore.setMode("cloud");
       }
     } catch {
       // Watch UI optional.
@@ -168,34 +215,82 @@ export default function App() {
     setTitle(selected?.title || "");
     setArtist(selected?.artist || "");
     setCurrentTime(0);
-    setPlaying(false);
     setWaveform([]);
     const audio = audioRef.current;
+    const shouldAutoplay = playAfterLoadRef.current || autoplayNext;
+    playAfterLoadRef.current = false;
+    setAutoplayNext(false);
     if (audio) {
-      audio.pause();
+      if (!shouldAutoplay) audio.pause();
       audio.load();
     }
-    if (!selected) return;
-    if (selected.clientOnly || selected.waveformUrl.startsWith("client-waveform:")) {
-      setWaveform(clientLibrary.waveform(selected.id));
+    if (!selected) {
+      setPlaying(false);
       return;
     }
-    const controller = new AbortController();
-    fetch(selected.waveformUrl, {signal: controller.signal})
-      .then((response) => {
-        if (!response.ok) throw new Error(`Waveform request failed (${response.status})`);
-        return response.json() as Promise<number[]>;
-      })
-      .then(setWaveform)
-      .catch((cause: unknown) => {
-        if ((cause as {name?: string}).name !== "AbortError") console.warn("Waveform decode failed", cause);
-      });
-    return () => controller.abort();
-  }, [selected]);
+    let abort: AbortController | null = null;
+    const cached = waveformCacheRef.current.get(selected.id);
+    if (cached) {
+      setWaveform(cached);
+    } else if (selected.clientOnly || selected.waveformUrl.startsWith("client-waveform:")) {
+      const wave = clientLibrary.waveform(selected.id);
+      waveformCacheRef.current.set(selected.id, wave);
+      setWaveform(wave);
+    } else {
+      abort = new AbortController();
+      fetch(selected.waveformUrl, {signal: abort.signal})
+        .then((response) => {
+          if (!response.ok) throw new Error(`Waveform request failed (${response.status})`);
+          return response.json() as Promise<number[]>;
+        })
+        .then((wave) => {
+          waveformCacheRef.current.set(selected.id, wave);
+          setWaveform(wave);
+        })
+        .catch((cause: unknown) => {
+          if ((cause as {name?: string}).name !== "AbortError") console.warn("Waveform decode failed", cause);
+        });
+    }
+    if (shouldAutoplay && audio) {
+      void (async () => {
+        try {
+          await ensureAudioGraphRef.current();
+          await audio.play();
+        } catch {
+          setPlaying(false);
+        }
+      })();
+    }
+    return () => {
+      abort?.abort();
+    };
+  }, [selected?.id]);
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume;
-  }, [volume]);
+    if (audioRef.current) audioRef.current.volume = muted ? 0 : volume;
+  }, [volume, muted]);
+
+  useEffect(() => {
+    savePlayerPrefs({
+      shuffle: queue.shuffle,
+      repeat: queue.repeat,
+      volume,
+      muted,
+    });
+  }, [queue.shuffle, queue.repeat, volume, muted]);
+
+  // Prefetch next track in queue for snappier skips
+  useEffect(() => {
+    const q = queue;
+    const nextId = q.order[q.index + 1] || (q.repeat === "all" ? q.order[0] : null);
+    if (!nextId || nextId === selectedId) return;
+    const track = tracks.find((t) => t.id === nextId);
+    if (!track?.mediaUrl) return;
+    if (!prefetchRef.current) prefetchRef.current = new Audio();
+    const el = prefetchRef.current;
+    el.preload = "auto";
+    if (el.src !== track.mediaUrl) el.src = track.mediaUrl;
+  }, [queue, selectedId, tracks]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -246,6 +341,7 @@ export default function App() {
     }
     if (context.state === "suspended") await context.resume();
   };
+  ensureAudioGraphRef.current = ensureAudioGraph;
 
   const togglePlayback = async () => {
     const audio = audioRef.current;
@@ -259,12 +355,83 @@ export default function App() {
   };
   togglePlaybackRef.current = togglePlayback;
 
+  const goToTrack = useCallback((trackId: string | null, autoplay: boolean) => {
+    if (!trackId) {
+      setPlaying(false);
+      audioRef.current?.pause();
+      return;
+    }
+    if (autoplay) playAfterLoadRef.current = true;
+    setSelectedId(trackId);
+    setQueue((q) => jumpTo(q, trackId));
+  }, []);
+
+  const handleTrackEnded = useCallback(() => {
+    const result = onTrackEnded(queueRef.current);
+    setQueue(result.queue);
+    if (result.trackId && result.autoplay) {
+      if (result.trackId === selectedId && queueRef.current.repeat === "one") {
+        const audio = audioRef.current;
+        if (audio) {
+          audio.currentTime = 0;
+          void audio.play().catch(() => setPlaying(false));
+        }
+        return;
+      }
+      goToTrack(result.trackId, true);
+    } else {
+      setPlaying(false);
+    }
+  }, [goToTrack, selectedId]);
+
+  const playQueue = useCallback((trackIds: string[], options: {shuffle?: boolean; startId?: string; sourceLabel?: string; autoplay?: boolean} = {}) => {
+    const prefs = loadPlayerPrefs();
+    const next = createQueue(trackIds, {
+      shuffle: options.shuffle ?? prefs.shuffle,
+      repeat: prefs.repeat,
+      startId: options.startId || trackIds[0],
+      sourceLabel: options.sourceLabel || "Library",
+    });
+    setQueue(next);
+    const id = currentId(next);
+    if (id) {
+      if (options.autoplay !== false) playAfterLoadRef.current = true;
+      setSelectedId(id);
+    }
+  }, []);
+
+  const selectAdjacent = (offset: number) => {
+    if (offset > 0) {
+      const result = skipNext(queueRef.current);
+      setQueue(result.queue);
+      if (result.trackId && result.trackId !== selectedId) goToTrack(result.trackId, playing);
+      return;
+    }
+    const audio = audioRef.current;
+    const result = skipPrev(queueRef.current, audio?.currentTime || 0);
+    setQueue(result.queue);
+    if (result.restart && result.trackId === selectedId && audio) {
+      audio.currentTime = 0;
+      setCurrentTime(0);
+      return;
+    }
+    if (result.trackId) goToTrack(result.trackId, playing);
+  };
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.code !== "Space" || event.repeat || target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target?.tagName || "")) return;
-      event.preventDefault();
-      void togglePlaybackRef.current();
+      const tag = target?.tagName || "";
+      if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+      if (event.code === "Space" && !event.repeat && tag !== "BUTTON") {
+        event.preventDefault();
+        void togglePlaybackRef.current();
+        return;
+      }
+      if (event.key === "m" || event.key === "M") {
+        event.preventDefault();
+        setMuted((m) => !m);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -278,12 +445,6 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [confirmDialog]);
-
-  const selectAdjacent = (offset: number) => {
-    if (!selected || !tracks.length) return;
-    const index = tracks.findIndex((track) => track.id === selected.id);
-    setSelectedId(tracks[(index + offset + tracks.length) % tracks.length].id);
-  };
 
   const saveMetadata = async () => {
     if (!selected || !title.trim() || !artist.trim()) return;
@@ -436,6 +597,91 @@ export default function App() {
     }
   };
 
+  const startPlaylistExport = async (playlist: Playlist) => {
+    const ordered = playlist.trackIds
+      .map((id) => tracks.find((t) => t.id === id))
+      .filter((t): t is Track => Boolean(t?.mediaUrl));
+    if (!ordered.length) {
+      setError("This playlist has no available tracks to export.");
+      return;
+    }
+    if (jobs.some((j) => ACTIVE_STATUSES.has(j.status))) {
+      setError("Finish or cancel the current export first.");
+      return;
+    }
+
+    setError("");
+    const settings = buildRenderSettings(resolution, audioBitrate);
+    const id = `playlist-${Date.now().toString(36)}`;
+    const job: RenderJob = {
+      id,
+      trackId: playlist.id,
+      trackTitle: `${playlist.name} (${ordered.length} tracks)`,
+      settings,
+      status: "rendering",
+      stage: "Preparing playlist export…",
+      progress: 0,
+      createdAt: new Date().toISOString(),
+      outputs: [],
+      log: [`Merging ${ordered.length} tracks in playlist order (browser encode).`],
+    };
+    setJobs((items) => [job, ...items]);
+    setExportSize(null);
+    setView("renders");
+
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+
+    try {
+      const result = await exportPlaylistClientVideo({
+        tracks: ordered.map((t) => ({mediaUrl: t.mediaUrl, title: t.title})),
+        width: settings.width,
+        height: settings.height,
+        fileName: playlistVisualsFileName(playlist.name),
+        fps: 30,
+        audioBitrateKbps: settings.audioBitrate,
+        signal: controller.signal,
+        onProgress: (progressValue, stage) => {
+          setJobs((items) => items.map((item) =>
+            item.id === id
+              ? {...item, progress: progressValue, stage, status: progressValue >= 100 ? "complete" : "rendering"}
+              : item,
+          ));
+        },
+      });
+
+      const saved: SavedRender = {fileName: result.fileName, url: result.objectUrl};
+      setSavedRenders((items) => [saved, ...items]);
+      setJobs((items) => items.map((item) =>
+        item.id === id
+          ? {
+            ...item,
+            status: "complete",
+            stage: "Playlist export complete — downloaded to your device",
+            progress: 100,
+            outputs: [{fileName: result.fileName, url: result.objectUrl}],
+          }
+          : item,
+      ));
+    } catch (cause) {
+      const aborted = (cause as {name?: string}).name === "AbortError";
+      setJobs((items) => items.map((item) =>
+        item.id === id
+          ? {
+            ...item,
+            status: aborted ? "cancelled" : "failed",
+            stage: aborted ? "Cancelled" : "Playlist export failed",
+            error: aborted ? undefined : (cause instanceof Error ? cause.message : String(cause)),
+          }
+          : item,
+      ));
+      if (!aborted) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExportSize(null);
+      exportAbortRef.current = null;
+    }
+  };
+
   const executeRemoveTrack = async (trackId: string, deleteFile: boolean) => {
     setRemovingId(trackId);
     setError("");
@@ -454,6 +700,9 @@ export default function App() {
       }
       const nextTracks = mergeTracks(serverTracks);
       setTracks(nextTracks);
+      setQueue((q) => removeTrackFromQueue(q, trackId));
+      const stripped = await playlistStore.stripTrack(trackId);
+      setPlaylists(stripped);
       setSelectedId((current) => {
         if (current !== trackId) return current;
         return nextTracks[0]?.id || "";
@@ -539,12 +788,33 @@ export default function App() {
   };
 
   const selectTrack = (trackId: string) => {
+    setQueue((q) => {
+      if (q.order.includes(trackId)) return jumpTo(q, trackId);
+      // Selecting outside current playlist queue switches to library queue
+      return createQueue(tracks.map((t) => t.id), {
+        shuffle: q.shuffle,
+        repeat: q.repeat,
+        startId: trackId,
+        sourceLabel: "Library",
+      });
+    });
     setSelectedId(trackId);
     setSidebarOpen(false);
   };
 
+  const playPlaylist = (playlist: Playlist, shuffle: boolean) => {
+    const ids = playlist.trackIds.filter((id) => tracks.some((t) => t.id === id));
+    if (!ids.length) {
+      setError("This playlist has no available tracks.");
+      return;
+    }
+    playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
+    setView("visualize");
+  };
+
   const nav = [
     {id: "library" as const, label: "Library", icon: Library},
+    {id: "playlists" as const, label: "Playlists", icon: ListMusic},
     {id: "import" as const, label: "Import", icon: CloudUpload},
     {id: "visualize" as const, label: "Visualize", icon: AudioWaveform},
     {id: "renders" as const, label: "Renders", icon: Clapperboard},
@@ -592,10 +862,10 @@ export default function App() {
         ref={audioRef}
         src={selected?.mediaUrl}
         crossOrigin="anonymous"
-        preload="metadata"
+        preload="auto"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
+        onEnded={() => handleTrackEnded()}
       />
       <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.flac,.m4a,.opus" multiple onChange={(event) => event.target.files && void importFiles(event.target.files)} />
 
@@ -672,18 +942,80 @@ export default function App() {
               {selected && <DiscPlayer key={selected.id} track={selected} playing={playing} currentTime={currentTime} progress={progress} />}
               {!selected && <div className="stage-empty"><Music2 size={42} /><h1>Import a track to begin</h1></div>}
             </div>
-            <div className="transport">
-              <div className="transport-buttons">
-                <button onClick={() => selectAdjacent(-1)} aria-label="Previous track"><SkipBack size={22} fill="currentColor" /></button>
-                <button className="play-button" onClick={() => void togglePlayback()} aria-label={playing ? "Pause" : "Play"}>{playing ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}</button>
-                <button onClick={() => selectAdjacent(1)} aria-label="Next track"><SkipForward size={22} fill="currentColor" /></button>
-              </div>
-              <time className="mono">{formatTime(currentTime)}</time>
-              <WaveformSeek waveform={waveform} progress={progress} onSeek={seek} />
-              <time className="mono">{formatTime(selected?.duration || 0)}</time>
-              <div className="volume-control"><Volume2 size={18} /><input aria-label="Volume" type="range" min="0" max="1" step=".01" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></div>
-            </div>
+            <TransportBar
+              playing={playing}
+              currentTime={currentTime}
+              duration={selected?.duration || 0}
+              waveform={waveform}
+              volume={volume}
+              muted={muted}
+              shuffle={queue.shuffle}
+              repeat={queue.repeat}
+              sourceLabel={queue.sourceLabel}
+              onTogglePlay={() => void togglePlayback()}
+              onPrev={() => selectAdjacent(-1)}
+              onNext={() => selectAdjacent(1)}
+              onSeek={seek}
+              onVolume={(value) => {
+                setVolume(value);
+                if (value > 0) {
+                  lastVolumeRef.current = value;
+                  setMuted(false);
+                } else {
+                  setMuted(true);
+                }
+              }}
+              onToggleMute={() => {
+                setMuted((m) => {
+                  if (m) {
+                    setVolume(lastVolumeRef.current || 0.86);
+                    return false;
+                  }
+                  if (volume > 0) lastVolumeRef.current = volume;
+                  return true;
+                });
+              }}
+              onToggleShuffle={() => setQueue((q) => setShuffle(q, !q.shuffle))}
+              onCycleRepeat={() => setQueue((q) => setRepeat(q, cycleRepeat(q.repeat)))}
+            />
           </>
+        )}
+        {view === "playlists" && (
+          <PlaylistView
+            playlists={playlists}
+            tracks={tracks}
+            selectedTrackId={selectedId}
+            TrackCover={TrackCover}
+            busy={loading}
+            onCreate={async (name) => {
+              await playlistStore.create(name);
+              setPlaylists(playlistStore.list());
+            }}
+            onRename={async (id, name) => {
+              await playlistStore.update(id, {name});
+              setPlaylists(playlistStore.list());
+            }}
+            onDelete={(id, name) => {
+              setConfirmDialog({
+                mode: "simple",
+                title: "Delete playlist",
+                body: `Delete “${name}”? Tracks stay in your library.`,
+                confirmLabel: "Delete",
+                danger: true,
+                onConfirm: async () => {
+                  setPlaylists(await playlistStore.remove(id));
+                },
+              });
+            }}
+            onUpdateTracks={async (id, trackIds) => {
+              await playlistStore.update(id, {trackIds});
+              setPlaylists(playlistStore.list());
+            }}
+            onPlay={playPlaylist}
+            onSelectTrack={selectTrack}
+            onExport={(pl) => void startPlaylistExport(pl)}
+            exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
+          />
         )}
         {view === "import" && (
           <div className="utility-view import-view">

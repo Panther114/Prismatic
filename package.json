@@ -2,8 +2,9 @@
   "name": "prismatic",
   "version": "1.0.0",
   "private": true,
-  "description": "Prismatic — cinematic music visualizer. Browser-side export keeps the host lightweight.",
+  "description": "Prismatic — cinematic music visualizer & player. Browser-side export keeps the host lightweight.",
   "type": "module",
+  "main": "electron/main.cjs",
   "engines": {
     "node": ">=22"
   },
@@ -14,7 +15,10 @@
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm build",
     "prepare:sample": "tsx scripts/prepare-sample.ts",
-    "render:sample": "tsx scripts/render-sample.ts"
+    "render:sample": "tsx scripts/render-sample.ts",
+    "electron:dev": "pnpm build && cross-env NODE_ENV=production PRISMATIC_LOCAL=1 electron .",
+    "electron:build": "pnpm build && electron-builder --win nsis",
+    "dist:win": "pnpm electron:build"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.2.8",
@@ -38,10 +42,57 @@
     "@types/node": "^24.0.14",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.8.3"
   },
   "optionalDependencies": {
     "@napi-rs/canvas": "^0.1.80"
+  },
+  "build": {
+    "appId": "app.prismatic.desktop",
+    "productName": "Prismatic",
+    "copyright": "Copyright © Prismatic",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "public/music-note.png",
+      "public/favicon.svg",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "server/**/*",
+      "node_modules/tsx/**/*",
+      "node_modules/esbuild/**/*",
+      "node_modules/@esbuild/**/*"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Prismatic"
+    }
   },
   "packageManager": "pnpm@11.7.0"
 }

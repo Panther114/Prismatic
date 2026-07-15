@@ -1,4 +1,5 @@
 import type {Track} from "../types";
+import {idbDeleteTrack, idbListTracks, idbPutTrack, type StoredClientTrack} from "./clientIdb";
 
 const AUDIO_EXT = /\.(mp3|wav|flac|m4a|aac|ogg|opus)$/i;
 
@@ -35,19 +36,20 @@ async function decodeDurationAndWaveform(file: Blob): Promise<{duration: number;
   }
 }
 
-async function tryCoverUrl(file: File): Promise<string> {
+async function tryCoverBlob(file: File): Promise<{url: string; buffer?: ArrayBuffer; type?: string}> {
   try {
     const {parseBlob} = await import("music-metadata");
     const meta = await parseBlob(file);
     const pic = meta.common.picture?.[0];
-    if (!pic?.data) return "/music-note.png";
+    if (!pic?.data) return {url: "/music-note.png"};
     const bytes = pic.data instanceof Uint8Array ? pic.data : new Uint8Array(pic.data as ArrayBuffer);
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
-    const blob = new Blob([copy], {type: pic.format || "image/jpeg"});
-    return URL.createObjectURL(blob);
+    const type = pic.format || "image/jpeg";
+    const blob = new Blob([copy], {type});
+    return {url: URL.createObjectURL(blob), buffer: copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength), type};
   } catch {
-    return "/music-note.png";
+    return {url: "/music-note.png"};
   }
 }
 
@@ -61,6 +63,7 @@ export type ClientTrackExtras = {
 export class ClientLibrary {
   private tracks: Track[] = [];
   private extras = new Map<string, ClientTrackExtras>();
+  private hydrated = false;
 
   list() {
     return [...this.tracks];
@@ -74,6 +77,89 @@ export class ClientLibrary {
     return this.extras.get(id)?.waveform || [];
   }
 
+  /** Restore tracks from IndexedDB (cloud offline). */
+  async hydrate() {
+    if (this.hydrated) return this.list();
+    this.hydrated = true;
+    if (typeof indexedDB === "undefined") return this.list();
+    try {
+      const stored = await idbListTracks();
+      for (const row of stored) {
+        if (this.tracks.some((t) => t.id === row.id)) continue;
+        const audioBlob = new Blob([row.audio], {type: row.audioType || "audio/mpeg"});
+        const file = new File([audioBlob], row.fileName, {type: row.audioType || "audio/mpeg"});
+        const mediaUrl = URL.createObjectURL(audioBlob);
+        let coverUrl = "/music-note.png";
+        const objectUrls = [mediaUrl];
+        if (row.cover && row.cover.byteLength) {
+          const coverBlob = new Blob([row.cover], {type: row.coverType || "image/jpeg"});
+          coverUrl = URL.createObjectURL(coverBlob);
+          objectUrls.push(coverUrl);
+        }
+        const track: Track = {
+          id: row.id,
+          sourceId: "browser",
+          fileName: row.fileName,
+          relativePath: row.fileName,
+          folder: "Browser",
+          mediaUrl,
+          coverUrl,
+          waveformUrl: `client-waveform:${row.id}`,
+          title: row.title,
+          artist: row.artist,
+          album: row.album,
+          duration: row.duration,
+          bitrate: null,
+          format: row.format,
+          clientOnly: true,
+        };
+        this.tracks.push(track);
+        this.extras.set(row.id, {file, waveform: row.waveform || [], objectUrls});
+      }
+    } catch (error) {
+      console.warn("Client library hydrate failed", error);
+    }
+    return this.list();
+  }
+
+  private async persist(id: string) {
+    const track = this.tracks.find((t) => t.id === id);
+    const extras = this.extras.get(id);
+    if (!track || !extras) return;
+    try {
+      const audio = await extras.file.arrayBuffer();
+      let cover: ArrayBuffer | undefined;
+      let coverType: string | undefined;
+      if (track.coverUrl.startsWith("blob:")) {
+        try {
+          const res = await fetch(track.coverUrl);
+          const blob = await res.blob();
+          cover = await blob.arrayBuffer();
+          coverType = blob.type || "image/jpeg";
+        } catch {
+          // ignore cover
+        }
+      }
+      const record: StoredClientTrack = {
+        id: track.id,
+        fileName: track.fileName,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: track.duration,
+        format: track.format,
+        waveform: extras.waveform,
+        audio,
+        audioType: extras.file.type || "audio/mpeg",
+        cover,
+        coverType,
+      };
+      await idbPutTrack(record);
+    } catch (error) {
+      console.warn("Client library persist failed", error);
+    }
+  }
+
   async importFiles(files: FileList | File[]) {
     const list = Array.from(files).filter((file) => AUDIO_EXT.test(file.name) || file.type.startsWith("audio/"));
     if (!list.length) throw new Error("No supported audio files selected");
@@ -81,8 +167,8 @@ export class ClientLibrary {
     for (const file of list) {
       const {duration, waveform} = await decodeDurationAndWaveform(file);
       const mediaUrl = URL.createObjectURL(file);
-      const coverUrl = await tryCoverUrl(file);
-      const objectUrls = coverUrl.startsWith("blob:") ? [mediaUrl, coverUrl] : [mediaUrl];
+      const cover = await tryCoverBlob(file);
+      const objectUrls = cover.url.startsWith("blob:") ? [mediaUrl, cover.url] : [mediaUrl];
       let title = baseName(file.name);
       let artist = "Unknown Artist";
       let album = "";
@@ -103,7 +189,7 @@ export class ClientLibrary {
         relativePath: file.name,
         folder: "Browser",
         mediaUrl,
-        coverUrl,
+        coverUrl: cover.url,
         waveformUrl: `client-waveform:${id}`,
         title,
         artist,
@@ -115,6 +201,7 @@ export class ClientLibrary {
       };
       this.tracks.push(track);
       this.extras.set(id, {file, waveform, objectUrls});
+      void this.persist(id);
     }
     return this.list();
   }
@@ -124,6 +211,7 @@ export class ClientLibrary {
     if (!track) return null;
     track.title = update.title.trim() || track.title;
     track.artist = update.artist.trim() || track.artist;
+    void this.persist(id);
     return {...track};
   }
 
@@ -134,6 +222,7 @@ export class ClientLibrary {
       this.extras.delete(id);
     }
     this.tracks = this.tracks.filter((track) => track.id !== id);
+    void idbDeleteTrack(id).catch(() => undefined);
     return this.list();
   }
 }

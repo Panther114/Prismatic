@@ -47,4 +47,25 @@ export type RenderJob = {
 };
 
 export type SavedRender = {fileName: string; url: string};
-export type View = "library" | "import" | "renders" | "visualize";
+export type View = "library" | "playlists" | "import" | "renders" | "visualize";
+
+export type Playlist = {
+  id: string;
+  name: string;
+  trackIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RepeatMode = "off" | "all" | "one";
+
+export type PlayerPrefs = {
+  shuffle: boolean;
+  repeat: RepeatMode;
+  volume: number;
+  muted: boolean;
+};
+
+export type QueueSource =
+  | {kind: "library"}
+  | {kind: "playlist"; playlistId: string; name: string};

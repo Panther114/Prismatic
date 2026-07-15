@@ -19,7 +19,7 @@ export function buildRenderSettings(
   };
 }
 
-/** "Under tale" → "Under_tale_Visuals.mp4" */
+/** "Under tale" → "Under_tale_Visuals.webm" */
 export function visualsFileName(title: string) {
   const base = title
     .normalize("NFKD")
@@ -28,4 +28,15 @@ export function visualsFileName(title: string) {
     .replace(/^_+|_+$/g, "")
     .slice(0, 72) || "Track";
   return `${base}_Visuals.webm`;
+}
+
+/** Playlist name → single merged export filename */
+export function playlistVisualsFileName(playlistName: string) {
+  const base = playlistName
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64) || "Playlist";
+  return `${base}_Playlist_Visuals.webm`;
 }

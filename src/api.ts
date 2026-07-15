@@ -1,4 +1,4 @@
-import type {RenderSettings, Track, WatchFolder} from "./types";
+import type {Playlist, RenderSettings, Track, WatchFolder} from "./types";
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -73,4 +73,19 @@ export const api = {
     body: JSON.stringify({trackId, ...settings}),
   }),
   openOutput: () => fetch("/api/open-output", {method: "POST"}),
+  playlists: () => json<Playlist[]>("/api/playlists"),
+  createPlaylist: (body: {name: string; trackIds?: string[]}) =>
+    json<Playlist>("/api/playlists", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    }),
+  updatePlaylist: (id: string, body: {name?: string; trackIds?: string[]}) =>
+    json<Playlist>(`/api/playlists/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    }),
+  deletePlaylist: (id: string) =>
+    json<Playlist[]>(`/api/playlists/${encodeURIComponent(id)}`, {method: "DELETE"}),
 };

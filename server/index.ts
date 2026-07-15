@@ -22,6 +22,10 @@ const localFeatures =
   || (!isProduction && !process.env.RAILWAY_ENVIRONMENT && process.env.PRISMATIC_CLOUD !== "1");
 const port = Number(process.env.PORT || 4100);
 const host = process.env.HOST || (isProduction ? "0.0.0.0" : "127.0.0.1");
+/** Electron / portable installs write library state outside the install tree. */
+const dataRoot = process.env.PRISMATIC_DATA_DIR
+  ? path.resolve(process.env.PRISMATIC_DATA_DIR)
+  : root;
 
 const app = express();
 const server = createHttpServer(app);
@@ -41,11 +45,14 @@ app.get("/api/health", (_request, response) => {
 
 if (localFeatures) {
   const {MusicLibrary} = await import("./library.js");
+  const {PlaylistRepository} = await import("./playlists.js");
   const multer = (await import("multer")).default;
 
-  const musicDirectory = path.join(root, "music");
-  const stateDirectory = path.join(root, ".prismatic");
-  const outputDirectory = path.join(root, "output");
+  const musicDirectory = process.env.PRISMATIC_MUSIC_DIR
+    ? path.resolve(process.env.PRISMATIC_MUSIC_DIR)
+    : path.join(dataRoot, "music");
+  const stateDirectory = path.join(dataRoot, ".prismatic");
+  const outputDirectory = path.join(dataRoot, "output");
 
   await Promise.all([
     fs.mkdir(musicDirectory, {recursive: true}),
@@ -54,6 +61,7 @@ if (localFeatures) {
   ]);
 
   const library = new MusicLibrary(root, musicDirectory, stateDirectory);
+  const playlists = new PlaylistRepository(stateDirectory);
 
   const storage = multer.diskStorage({
     destination: musicDirectory,
@@ -182,7 +190,49 @@ if (localFeatures) {
       const deleteFile = String(request.query.deleteFile ?? "0") === "1";
       const ok = await library.remove(request.params.id, {deleteFile});
       if (!ok) return response.status(404).json({error: "Track not found"});
+      await playlists.stripTrack(request.params.id);
       response.json(await library.list());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/playlists", async (_request, response, next) => {
+    try {
+      response.json(await playlists.list());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/playlists", async (request, response, next) => {
+    try {
+      const name = String(request.body?.name || "New playlist");
+      const trackIds = Array.isArray(request.body?.trackIds) ? request.body.trackIds.map(String) : [];
+      response.status(201).json(await playlists.create({name, trackIds}));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/playlists/:id", async (request, response, next) => {
+    try {
+      const updated = await playlists.update(request.params.id, {
+        name: request.body?.name,
+        trackIds: request.body?.trackIds,
+      });
+      if (!updated) return response.status(404).json({error: "Playlist not found"});
+      response.json(updated);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/api/playlists/:id", async (request, response, next) => {
+    try {
+      const nextList = await playlists.remove(request.params.id);
+      if (!nextList) return response.status(404).json({error: "Playlist not found"});
+      response.json(nextList);
     } catch (error) {
       next(error);
     }
@@ -294,6 +344,10 @@ if (localFeatures) {
   });
   app.get("/api/jobs", (_request, response) => response.json([]));
   app.get("/api/renders", (_request, response) => response.json([]));
+  app.get("/api/playlists", (_request, response) => response.json([]));
+  app.post("/api/playlists", (_request, response) => {
+    response.status(400).json({error: "Cloud mode stores playlists in the browser."});
+  });
 }
 
 if (isProduction) {

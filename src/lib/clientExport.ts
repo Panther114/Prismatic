@@ -388,3 +388,227 @@ export async function exportClientVideo(options: ClientExportOptions): Promise<{
   return exportRealtimeMediaRecorder(options);
 }
 
+export type PlaylistExportTrack = {
+  mediaUrl: string;
+  title?: string;
+};
+
+export type PlaylistExportOptions = {
+  tracks: PlaylistExportTrack[];
+  width: number;
+  height: number;
+  fileName: string;
+  fps?: number;
+  audioBitrateKbps?: number;
+  onProgress?: (progress: number, stage: string) => void;
+  signal?: AbortSignal;
+};
+
+/**
+ * Export an entire playlist as one continuous visualizer video (tracks in order, merged).
+ * Offline WebCodecs only — one encoder/muxer with continuous timestamps.
+ */
+export async function exportPlaylistClientVideo(
+  options: PlaylistExportOptions,
+): Promise<{blob: Blob; objectUrl: string; fileName: string}> {
+  const {
+    tracks,
+    width: rawW,
+    height: rawH,
+    fileName,
+    fps = 30,
+    audioBitrateKbps = 256,
+    onProgress,
+    signal,
+  } = options;
+
+  if (!tracks.length) throw new Error("Playlist has no tracks to export");
+  if (!supportsWebCodecs()) {
+    throw new Error("Playlist export needs WebCodecs (Chrome or Edge recommended).");
+  }
+
+  const width = even(Math.max(2, rawW));
+  const height = even(Math.max(2, rawH));
+  const videoBitrate = width >= 3000 ? 24_000_000 : width >= 1600 ? 12_000_000 : 6_000_000;
+  const audioSampleRate = 48000;
+  const n = tracks.length;
+
+  const canvas = typeof OffscreenCanvas !== "undefined"
+    ? new OffscreenCanvas(width, height)
+    : Object.assign(document.createElement("canvas"), {width, height});
+  if ("width" in canvas) {
+    (canvas as HTMLCanvasElement | OffscreenCanvas).width = width;
+    (canvas as HTMLCanvasElement | OffscreenCanvas).height = height;
+  }
+  const ctx = (canvas as OffscreenCanvas).getContext("2d", {alpha: false}) as
+    | OffscreenCanvasRenderingContext2D
+    | CanvasRenderingContext2D
+    | null;
+  if (!ctx) throw new Error("Could not create export canvas");
+
+  let pendingVideo: EncodedVideoChunk[] = [];
+  let pendingAudio: EncodedAudioChunk[] = [];
+  let muxer: WebmMuxer | null = null;
+
+  const videoEncoder = new VideoEncoder({
+    output: (chunk) => {
+      if (muxer) muxer.addVideoChunk(chunk);
+      else pendingVideo.push(chunk);
+    },
+    error: (e) => console.error("VideoEncoder", e),
+  });
+  const videoMuxCodec = await configureVideoEncoder(videoEncoder, width, height, videoBitrate);
+
+  let audioEncoder: AudioEncoder | null = null;
+  let hasAudio = false;
+  if (typeof AudioEncoder !== "undefined") {
+    audioEncoder = new AudioEncoder({
+      output: (chunk) => {
+        if (muxer) muxer.addAudioChunk(chunk);
+        else pendingAudio.push(chunk);
+      },
+      error: (e) => console.error("AudioEncoder", e),
+    });
+    try {
+      const audioConfig: AudioEncoderConfig = {
+        codec: "opus",
+        sampleRate: audioSampleRate,
+        numberOfChannels: 1,
+        bitrate: Math.max(96_000, Math.min(320_000, audioBitrateKbps * 1000)),
+      };
+      const support = await AudioEncoder.isConfigSupported(audioConfig);
+      if (support.supported) {
+        audioEncoder.configure(audioConfig);
+        hasAudio = true;
+      } else {
+        audioEncoder.close();
+        audioEncoder = null;
+      }
+    } catch {
+      try { audioEncoder?.close(); } catch { /* ignore */ }
+      audioEncoder = null;
+    }
+  }
+
+  muxer = new WebmMuxer({
+    width,
+    height,
+    frameRate: fps,
+    videoCodec: videoMuxCodec,
+    sampleRate: audioSampleRate,
+    audioChannels: 1,
+    hasAudio,
+  });
+  for (const chunk of pendingVideo) muxer.addVideoChunk(chunk);
+  for (const chunk of pendingAudio) muxer.addAudioChunk(chunk);
+
+  let globalFrame = 0;
+  let audioSampleOffset = 0; // samples at 48k
+
+  for (let ti = 0; ti < n; ti += 1) {
+    if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
+    const track = tracks[ti];
+    const label = track.title || `Track ${ti + 1}`;
+    const base = (ti / n) * 100;
+    const span = 100 / n;
+
+    onProgress?.(Math.round(base), `Playlist · analyzing ${ti + 1}/${n} · ${label}`);
+    const analysis = await analyzeAudioForExport(
+      track.mediaUrl,
+      fps,
+      (p, stage) => {
+        // analyzeAudio uses 0–40-ish of single-track scale
+        onProgress?.(Math.round(base + (p / 100) * span * 0.35), `Playlist ${ti + 1}/${n} · ${stage}`);
+      },
+      signal,
+    );
+    if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
+
+    if (audioEncoder) {
+      onProgress?.(Math.round(base + span * 0.38), `Playlist ${ti + 1}/${n} · encoding audio · ${label}`);
+      const src = analysis.pcm;
+      const srcRate = analysis.sampleRate;
+      const ratio = srcRate / audioSampleRate;
+      const outLen = Math.max(1, Math.floor(src.length / ratio));
+      const resampled = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i += 1) {
+        const s = i * ratio;
+        const i0 = Math.floor(s);
+        const i1 = Math.min(src.length - 1, i0 + 1);
+        const t = s - i0;
+        resampled[i] = src[i0] * (1 - t) + src[i1] * t;
+      }
+      const frameSize = 960;
+      for (let offset = 0, frameIndex = 0; offset < resampled.length; offset += frameSize, frameIndex += 1) {
+        if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
+        const slice = resampled.subarray(offset, Math.min(resampled.length, offset + frameSize));
+        if (slice.length < 64) break;
+        const data = slice.length === frameSize ? slice : (() => {
+          const pad = new Float32Array(frameSize);
+          pad.set(slice);
+          return pad;
+        })();
+        const absoluteSample = audioSampleOffset + frameIndex * frameSize;
+        const timestamp = Math.round((absoluteSample / audioSampleRate) * 1_000_000);
+        const audioData = new AudioData({
+          format: "f32-planar",
+          sampleRate: audioSampleRate,
+          numberOfFrames: frameSize,
+          numberOfChannels: 1,
+          timestamp,
+          data,
+        });
+        await waitForEncoder(audioEncoder, 16);
+        audioEncoder.encode(audioData);
+        audioData.close();
+      }
+      audioSampleOffset += outLen;
+    }
+
+    const rippleState = createRippleState();
+    const total = analysis.totalFrames;
+    onProgress?.(Math.round(base + span * 0.48), `Playlist ${ti + 1}/${n} · rendering · ${label}`);
+
+    for (let frame = 0; frame < total; frame += 1) {
+      if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
+      const audioFrame = analysis.frames[frame];
+      const nowMs = (frame / fps) * 1000;
+      tickRipples(rippleState, audioFrame, nowMs);
+      drawExportFrame(ctx, width, height, audioFrame, nowMs, rippleState.ripples);
+
+      const timestamp = Math.round((globalFrame / fps) * 1_000_000);
+      const videoFrame = new VideoFrame(canvas as CanvasImageSource, {
+        timestamp,
+        duration: Math.round(1_000_000 / fps),
+      });
+      await waitForEncoder(videoEncoder, 6);
+      videoEncoder.encode(videoFrame, {keyFrame: globalFrame % (fps * 2) === 0});
+      videoFrame.close();
+      globalFrame += 1;
+
+      if (frame % 8 === 0) {
+        const local = total ? frame / total : 1;
+        onProgress?.(
+          Math.round(base + span * (0.48 + local * 0.48)),
+          `Playlist ${ti + 1}/${n} · ${label} · ${frame}/${total}`,
+        );
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+  }
+
+  onProgress?.(97, "Finalizing playlist export…");
+  if (audioEncoder) {
+    await audioEncoder.flush();
+    audioEncoder.close();
+  }
+  await videoEncoder.flush();
+  videoEncoder.close();
+
+  const blob = muxer!.finalize();
+  const safeName = fileName.replace(/\.(mp4|webm)$/i, "") + ".webm";
+  const objectUrl = downloadBlob(blob, safeName);
+  onProgress?.(100, "Playlist export complete");
+  return {blob, objectUrl, fileName: safeName};
+}
+
