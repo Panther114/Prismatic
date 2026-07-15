@@ -77,6 +77,7 @@ export default function App() {
   const [watchFolders, setWatchFolders] = useState<WatchFolder[]>([]);
   const [watchPath, setWatchPath] = useState("");
   const [watchBusy, setWatchBusy] = useState(false);
+  const [musicDirectory, setMusicDirectory] = useState("");
   const [exportSize, setExportSize] = useState<{width: number; height: number} | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<null | {
     mode: "simple" | "track-remove" | "track-remove-disk";
@@ -174,6 +175,7 @@ export default function App() {
     try {
       const meta = await api.libraryMeta();
       setWatchFolders(meta.watchFolders || []);
+      if (meta.musicDirectory) setMusicDirectory(meta.musicDirectory);
       libraryGenerationRef.current = meta.generation;
       if (meta.mode === "cloud") {
         cloudModeRef.current = true;
@@ -1055,7 +1057,10 @@ export default function App() {
                 <ul className="watch-list">
                   <li className="watch-item fixed">
                     <FolderOpen size={14} />
-                    <span className="track-copy"><strong>music/</strong><small>Built-in project folder · always watched</small></span>
+                    <span className="track-copy">
+                      <strong>Shared library</strong>
+                      <small>{musicDirectory || "%USERPROFILE%\\Music\\Prismatic"} · web + desktop</small>
+                    </span>
                   </li>
                   {watchFolders.map((folder) => (
                     <li className="watch-item" key={folder.id}>

@@ -35,8 +35,10 @@ export type LibraryMeta = {
   generation: number;
   watchFolders: WatchFolder[];
   musicDirectory: string;
+  dataRoot?: string;
   mode?: "local" | "cloud";
   clientExport?: boolean;
+  sharedLibrary?: boolean;
 };
 
 export const api = {

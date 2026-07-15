@@ -22,11 +22,6 @@ const localFeatures =
   || (!isProduction && !process.env.RAILWAY_ENVIRONMENT && process.env.PRISMATIC_CLOUD !== "1");
 const port = Number(process.env.PORT || 4100);
 const host = process.env.HOST || (isProduction ? "0.0.0.0" : "127.0.0.1");
-/** Electron / portable installs write library state outside the install tree. */
-const dataRoot = process.env.PRISMATIC_DATA_DIR
-  ? path.resolve(process.env.PRISMATIC_DATA_DIR)
-  : root;
-
 const app = express();
 const server = createHttpServer(app);
 
@@ -46,19 +41,21 @@ app.get("/api/health", (_request, response) => {
 if (localFeatures) {
   const {MusicLibrary} = await import("./library.js");
   const {PlaylistRepository} = await import("./playlists.js");
+  const {migrateProjectLibraryToShared, resolveLibraryPaths} = await import("./sharedPaths.js");
   const multer = (await import("multer")).default;
 
-  const musicDirectory = process.env.PRISMATIC_MUSIC_DIR
-    ? path.resolve(process.env.PRISMATIC_MUSIC_DIR)
-    : path.join(dataRoot, "music");
-  const stateDirectory = path.join(dataRoot, ".prismatic");
-  const outputDirectory = path.join(dataRoot, "output");
+  // Same default paths for `pnpm dev`, `pnpm start`, and Electron (see sharedPaths.ts).
+  const paths = resolveLibraryPaths(root);
+  const {musicDirectory, stateDirectory, outputDirectory, dataRoot} = paths;
 
-  await Promise.all([
-    fs.mkdir(musicDirectory, {recursive: true}),
-    fs.mkdir(stateDirectory, {recursive: true}),
-    fs.mkdir(outputDirectory, {recursive: true}),
-  ]);
+  const migration = await migrateProjectLibraryToShared(root, paths);
+  if (migration.seededMusic > 0) {
+    console.log(`Seeded ${migration.seededMusic} track(s) into shared library: ${musicDirectory}`);
+  }
+  if (migration.migratedState) {
+    console.log(`Migrated library state into: ${stateDirectory}`);
+  }
+  console.log(`Prismatic library · ${musicDirectory}`);
 
   const library = new MusicLibrary(root, musicDirectory, stateDirectory);
   const playlists = new PlaylistRepository(stateDirectory);
@@ -93,8 +90,11 @@ if (localFeatures) {
         generation: library.generationValue(),
         watchFolders: await library.getWatchFolders(),
         musicDirectory,
+        dataRoot,
         mode: "local",
         clientExport: true,
+        /** Web + Electron share this folder by default. */
+        sharedLibrary: true,
       });
     } catch (error) {
       next(error);

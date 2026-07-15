@@ -1,11 +1,16 @@
 /**
  * Prismatic Electron shell — starts the local production server, then opens a window.
- * Installer is stock NSIS (no custom UI). Offline: PRISMATIC_LOCAL=1 + userData paths.
+ * Installer is stock NSIS (no custom UI).
+ *
+ * Music + playlists share the same folder as local web:
+ *   %USERPROFILE%\Music\Prismatic
+ * (see server/sharedPaths.ts — override with PRISMATIC_DATA_DIR / PRISMATIC_MUSIC_DIR)
  */
 const {app, BrowserWindow, Menu, shell} = require("electron");
 const path = require("node:path");
 const {spawn} = require("node:child_process");
 const http = require("node:http");
+const os = require("node:os");
 
 const PORT = Number(process.env.PRISMATIC_PORT || 4188);
 const HOST = "127.0.0.1";
@@ -22,6 +27,15 @@ function projectRoot() {
     return base.replace("app.asar", "app.asar.unpacked");
   }
   return base;
+}
+
+/** Same default as server/sharedPaths.ts — keep in sync. */
+function sharedLibraryRoot() {
+  if (process.env.PRISMATIC_DATA_DIR) {
+    return path.resolve(process.env.PRISMATIC_DATA_DIR);
+  }
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+  return path.join(home, "Music", "Prismatic");
 }
 
 function waitForHealth(timeoutMs = 45000) {
@@ -55,8 +69,12 @@ function waitForHealth(timeoutMs = 45000) {
 
 function startServer() {
   const root = projectRoot();
-  const dataDir = path.join(app.getPath("userData"), "data");
-  const musicDir = path.join(dataDir, "music");
+  const dataDir = sharedLibraryRoot();
+  // Music files live in the shared root (not userData) so web + desktop stay in sync.
+  const musicDir = process.env.PRISMATIC_MUSIC_DIR
+    ? path.resolve(process.env.PRISMATIC_MUSIC_DIR)
+    : dataDir;
+
   const env = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: "1",
@@ -151,4 +169,3 @@ app.on("before-quit", () => {
     }
   }
 });
-

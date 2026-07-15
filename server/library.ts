@@ -72,7 +72,12 @@ async function walk(directory: string): Promise<string[]> {
   }
   const nested = await Promise.all(
     entries.map(async (entry) => {
+      // Skip dot dirs (.prismatic) and shared layout folders (output, etc.)
       if (entry.name.startsWith(".")) return [] as string[];
+      const lower = entry.name.toLowerCase();
+      if (lower === "output" || lower === "node_modules" || lower === "dist" || lower === "release") {
+        return [] as string[];
+      }
       const fullPath = path.join(directory, entry.name);
       if (entry.isDirectory()) return walk(fullPath);
       return [fullPath];
@@ -191,7 +196,7 @@ export class MusicLibrary {
     const defaults: SourceRoot[] = [{
       id: "music",
       absolutePath: path.resolve(this.musicDirectory),
-      label: "Music",
+      label: "Shared library",
       isDefault: true,
     }];
     const extra = this.settings.watchFolders
