@@ -63,6 +63,32 @@ async function exactDuration(file: string, fallback: number) {
   }
 }
 
+const AUDIO_FILE = /\.(mp3|wav|flac|m4a|aac|ogg|opus)$/i;
+
+/** Collect audio paths under `root`, including only folders up to `maxDepth` below root. */
+async function collectAudioFiles(rootDir: string, maxDepth: number): Promise<string[]> {
+  const out: string[] = [];
+  const visit = async (directory: string, depth: number) => {
+    let entries;
+    try {
+      entries = await fs.readdir(directory, {withFileTypes: true});
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (depth < maxDepth) await visit(full, depth + 1);
+        continue;
+      }
+      if (entry.isFile() && AUDIO_FILE.test(entry.name)) out.push(full);
+    }
+  };
+  await visit(rootDir, 0);
+  return out;
+}
+
 async function walk(directory: string): Promise<string[]> {
   let entries;
   try {
@@ -508,6 +534,53 @@ export class MusicLibrary {
       await this.writeSettings();
     }
     this.markDirty();
+  }
+
+  /**
+   * Clone audio files from an arbitrary folder into the shared music library.
+   * maxDepth 0 = only direct children; 1 = one nested level; etc.
+   * Returns how many files were copied (originals are never modified).
+   */
+  async importFolderCopy(folderPath: string, maxDepth = 0): Promise<{imported: string[]; skipped: number}> {
+    const absolute = path.resolve(folderPath);
+    const stat = await fs.stat(absolute).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error(`Not a folder: ${folderPath}`);
+
+    const libraryRoot = path.resolve(this.musicDirectory);
+    if (absolute.toLowerCase() === libraryRoot.toLowerCase()
+      || absolute.toLowerCase().startsWith(`${libraryRoot.toLowerCase()}${path.sep}`)) {
+      throw new Error("That folder is already inside the shared music library — no copy needed.");
+    }
+
+    await fs.mkdir(this.musicDirectory, {recursive: true});
+    const found = await collectAudioFiles(absolute, maxDepth);
+    const imported: string[] = [];
+    let skipped = 0;
+
+    for (const source of found) {
+      const base = path.basename(source).replace(/[^\p{L}\p{N}._ -]+/gu, "-") || `audio-${Date.now()}.mp3`;
+      let destName = base;
+      let dest = path.join(this.musicDirectory, destName);
+      // If name exists, only skip when same size (already imported); else uniquify.
+      const existing = await fs.stat(dest).catch(() => null);
+      if (existing?.isFile()) {
+        const srcStat = await fs.stat(source);
+        if (existing.size === srcStat.size) {
+          skipped += 1;
+          continue;
+        }
+        const ext = path.extname(base);
+        const stem = path.basename(base, ext);
+        destName = `${stem}-${Date.now().toString(36)}${ext}`;
+        dest = path.join(this.musicDirectory, destName);
+      }
+      await fs.copyFile(source, dest);
+      imported.push(destName);
+    }
+
+    if (imported.length) await this.noteImportedFiles(imported);
+    else this.markDirty();
+    return {imported, skipped};
   }
 
   getRoot() {

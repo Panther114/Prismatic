@@ -72,6 +72,9 @@ export default function App() {
   const [audioBitrate, setAudioBitrate] = useState<128 | 192 | 256 | 320>(320);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [folderDepth, setFolderDepth] = useState(0);
+  const [folderPathInput, setFolderPathInput] = useState("");
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [cancellingId, setCancellingId] = useState("");
   const [removingId, setRemovingId] = useState("");
   const [watchFolders, setWatchFolders] = useState<WatchFolder[]>([]);
@@ -478,6 +481,7 @@ export default function App() {
         all = await clientLibrary.importFiles(files);
       } else {
         try {
+          // Server multer clones files into the shared music library.
           const serverTracks = await api.importAudio(files);
           all = mergeTracks(serverTracks);
         } catch {
@@ -496,6 +500,70 @@ export default function App() {
     } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
+    }
+  };
+
+  /** Browser folder picker: filter by max depth using webkitRelativePath, then clone via import. */
+  const importFolderFromPicker = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const depth = Math.max(0, folderDepth);
+    const list = Array.from(files).filter((file) => {
+      const rel = (file as File & {webkitRelativePath?: string}).webkitRelativePath || file.name;
+      // rel = "Folder/sub/file.mp3" → depth under folder root = segments after first - 1 for file
+      const parts = rel.split(/[/\\]/).filter(Boolean);
+      // parts[0] is root folder name; file depth = parts.length - 2 (0 = file directly in chosen folder)
+      const fileDepth = Math.max(0, parts.length - 2);
+      return fileDepth <= depth;
+    });
+    if (!list.length) {
+      setError(`No audio files found at depth ≤ ${depth}. Try a higher scan layer.`);
+      if (folderInputRef.current) folderInputRef.current.value = "";
+      return;
+    }
+    await importFiles(list);
+  };
+
+  /** Local path import: server copies files into Music/Prismatic (safe to delete originals). */
+  const importFolderFromPath = async (folderPath: string) => {
+    const trimmed = folderPath.trim();
+    if (!trimmed) return;
+    setImporting(true);
+    setError("");
+    try {
+      const result = await api.importFolder(trimmed, folderDepth);
+      setTracks(mergeTracks(result.tracks));
+      if (result.musicDirectory) setMusicDirectory(result.musicDirectory);
+      const n = result.imported.length;
+      if (!n && result.skipped) {
+        setError(`No new files (skipped ${result.skipped} already in library).`);
+      } else if (!n) {
+        setError("No audio files found at that depth.");
+      } else {
+        setView("library");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const browseImportFolder = async () => {
+    setError("");
+    setImporting(true);
+    try {
+      const result = await api.browseWatchFolder();
+      if (result?.cancelled || !result?.path) {
+        setImporting(false);
+        return;
+      }
+      setFolderPathInput(result.path);
+      setImporting(false);
+      await importFolderFromPath(result.path);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setImporting(false);
     }
   };
 
@@ -870,6 +938,19 @@ export default function App() {
         onEnded={() => handleTrackEnded()}
       />
       <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.flac,.m4a,.opus" multiple onChange={(event) => event.target.files && void importFiles(event.target.files)} />
+      <input
+        ref={(el) => {
+          folderInputRef.current = el;
+          if (el) {
+            el.setAttribute("webkitdirectory", "");
+            el.setAttribute("directory", "");
+          }
+        }}
+        className="sr-only"
+        type="file"
+        multiple
+        onChange={(event) => void importFolderFromPicker(event.target.files)}
+      />
 
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="brand-row">
@@ -1021,12 +1102,74 @@ export default function App() {
         )}
         {view === "import" && (
           <div className="utility-view import-view">
-            <div className="utility-heading"><span>Import</span><h1>Add audio.</h1><p>Tags load automatically · MP3, WAV, FLAC, M4A, AAC, OGG, Opus</p></div>
+            <div className="utility-heading">
+              <span>Import</span>
+              <h1>Add audio.</h1>
+              <p>
+                {cloudMode
+                  ? "Files stay in this browser session (and offline cache)."
+                  : "Imports are copied into your shared library — originals can be deleted afterward."}
+                {" · "}MP3, WAV, FLAC, M4A, AAC, OGG, Opus
+              </p>
+            </div>
             <button className="drop-zone" onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault(); void importFiles(event.dataTransfer.files);}}>
               {importing ? <LoaderCircle className="spin" size={26} /> : <CloudUpload size={26} strokeWidth={1.4} />}
-              <strong>{importing ? "Reading metadata…" : "Drop audio here"}</strong>
+              <strong>{importing ? "Importing & copying…" : "Drop audio here"}</strong>
               <span>or choose files</span>
             </button>
+
+            <section className="watch-panel import-folder-panel">
+              <div className="watch-panel-head">
+                <FolderPlus size={15} />
+                <div>
+                  <strong>Import from folder</strong>
+                  <span>
+                    Copy matching audio into the library once.
+                    {musicDirectory ? ` Destination: ${musicDirectory}` : ""}
+                  </span>
+                </div>
+              </div>
+              <div className="folder-depth-row">
+                <label>
+                  Scan layer (depth)
+                  <input
+                    type="number"
+                    min={0}
+                    max={16}
+                    value={folderDepth}
+                    onChange={(event) => setFolderDepth(Math.max(0, Math.min(16, Number(event.target.value) || 0)))}
+                    aria-label="Folder scan depth"
+                  />
+                </label>
+                <span className="save-hint mono">
+                  0 = only files in the folder · 1 = one subfolder level · higher = deeper
+                </span>
+              </div>
+              <div className="watch-add-row">
+                <button type="button" className="secondary-button" disabled={importing} onClick={() => folderInputRef.current?.click()}>
+                  Choose folder…
+                </button>
+                {!cloudMode && (
+                  <>
+                    <input
+                      value={folderPathInput}
+                      onChange={(event) => setFolderPathInput(event.target.value)}
+                      placeholder="D:\Music\Albums"
+                      aria-label="Folder path to import"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void importFolderFromPath(folderPathInput);
+                      }}
+                    />
+                    <button type="button" className="secondary-button" disabled={importing || !folderPathInput.trim()} onClick={() => void importFolderFromPath(folderPathInput)}>
+                      Import path
+                    </button>
+                    <button type="button" className="secondary-button" disabled={importing} onClick={() => void browseImportFolder()}>
+                      Browse…
+                    </button>
+                  </>
+                )}
+              </div>
+            </section>
 
             {!cloudMode && (
               <section className="watch-panel">

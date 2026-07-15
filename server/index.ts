@@ -9,12 +9,14 @@
 import {createServer as createHttpServer} from "node:http";
 import {fileURLToPath} from "node:url";
 import path from "node:path";
-import {promises as fs} from "node:fs";
-import {createReadStream} from "node:fs";
+import {promises as fs, existsSync, createReadStream} from "node:fs";
 import {spawn} from "node:child_process";
 import express from "express";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+/** Project / package root. Electron sets PRISMATIC_APP_ROOT to app.asar so `dist/` resolves. */
+const root = process.env.PRISMATIC_APP_ROOT
+  ? path.resolve(process.env.PRISMATIC_APP_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isProduction = process.env.NODE_ENV === "production";
 /** Full disk library only when not on Railway / forced cloud. */
 const localFeatures =
@@ -60,16 +62,27 @@ if (localFeatures) {
   const library = new MusicLibrary(root, musicDirectory, stateDirectory);
   const playlists = new PlaylistRepository(stateDirectory);
 
+  const safeMusicFileName = (original: string) => {
+    const base = path.basename(original).replace(/[^\p{L}\p{N}._ -]+/gu, "-") || `audio-${Date.now()}.mp3`;
+    return base;
+  };
+
   const storage = multer.diskStorage({
     destination: musicDirectory,
     filename: (_request, file, callback) => {
-      const safe = path.basename(file.originalname).replace(/[^\p{L}\p{N}._ -]+/gu, "-");
-      callback(null, safe || `audio-${Date.now()}.mp3`);
+      let name = safeMusicFileName(file.originalname);
+      // Avoid clobbering an existing library file with a different import
+      if (existsSync(path.join(musicDirectory, name))) {
+        const ext = path.extname(name);
+        const stem = path.basename(name, ext);
+        name = `${stem}-${Date.now().toString(36)}${ext}`;
+      }
+      callback(null, name);
     },
   });
   const upload = multer({
     storage,
-    limits: {fileSize: 1024 * 1024 * 1024, files: 50},
+    limits: {fileSize: 1024 * 1024 * 1024, files: 200},
     fileFilter: (_request, file, callback) => {
       const allowed = new Set([".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"]);
       callback(null, allowed.has(path.extname(file.originalname).toLowerCase()));
@@ -165,11 +178,33 @@ if (localFeatures) {
     }
   });
 
-  app.post("/api/import", upload.array("audio", 50), async (request, response, next) => {
+  app.post("/api/import", upload.array("audio", 200), async (request, response, next) => {
     try {
       const files = (request.files as Express.Multer.File[] | undefined) || [];
+      // Multer already wrote clones into musicDirectory — originals are untouched.
       await library.noteImportedFiles(files.map((file) => file.filename || file.originalname));
       response.status(201).json(await library.list());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Copy audio from a disk folder into the shared music library (clone, not watch).
+   * maxDepth: 0 = only files directly in the folder; 1 = one subfolder level; etc.
+   */
+  app.post("/api/import-folder", async (request, response, next) => {
+    try {
+      const folderPath = String(request.body?.path || "").trim();
+      const maxDepth = Math.max(0, Math.min(32, Number(request.body?.maxDepth ?? 0) || 0));
+      if (!folderPath) return response.status(400).json({error: "Folder path is required"});
+      const result = await library.importFolderCopy(folderPath, maxDepth);
+      response.status(201).json({
+        tracks: await library.list(),
+        imported: result.imported,
+        skipped: result.skipped,
+        musicDirectory,
+      });
     } catch (error) {
       next(error);
     }

@@ -60,6 +60,13 @@ export const api = {
     Array.from(files).forEach((file) => form.append("audio", file));
     return json<Track[]>("/api/import", {method: "POST", body: form});
   },
+  /** Clone audio from a disk folder into the shared music library (local mode). */
+  importFolder: (folderPath: string, maxDepth = 0) =>
+    json<{tracks: Track[]; imported: string[]; skipped: number; musicDirectory: string}>("/api/import-folder", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path: folderPath, maxDepth}),
+    }),
   watchFolders: () => json<WatchFolder[]>("/api/watch-folders"),
   addWatchFolder: (folderPath: string) => json<WatchFolder[]>("/api/watch-folders", {
     method: "POST",

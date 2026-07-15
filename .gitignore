@@ -4,9 +4,12 @@ node_modules/
 
 # Build output
 dist/
-build/
 .out/
 release/
+# Keep build/icon.* for Electron; ignore other build junk
+build/*
+!build/icon.png
+!build/icon.ico
 *.tsbuildinfo
 
 # Prismatic local state & user data

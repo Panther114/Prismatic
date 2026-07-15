@@ -4,23 +4,30 @@ productName: Prismatic
 copyright: Copyright © Prismatic
 directories:
   output: release
+  buildResources: build
+icon: build/icon.png
 files:
   - dist/**/*
   - server/**/*
   - electron/**/*
+  - build/icon.png
   - public/music-note.png
   - public/favicon.svg
   - package.json
   - node_modules/**/*
 asar: true
 asarUnpack:
+  - dist/**/*
   - server/**/*
+  - electron/**/*
   - node_modules/tsx/**/*
   - node_modules/esbuild/**/*
   - node_modules/@esbuild/**/*
+  - node_modules/@esbuild/**/**
 extraMetadata:
   main: electron/main.cjs
 win:
+  icon: build/icon.png
   target:
     - target: nsis
       arch:
