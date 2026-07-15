@@ -1,8 +1,9 @@
-import {useMemo, useState, type ComponentType} from "react";
+import {useMemo, useState, type ComponentType, type DragEvent} from "react";
 import {
-  ChevronDown, ChevronUp, Clapperboard, ListMusic, LoaderCircle, Play, Plus, Shuffle, Trash2, Pencil, Check, X,
+  Clapperboard, GripVertical, LoaderCircle, Pencil, Play, Plus, Shuffle, Trash2, X, Check,
 } from "lucide-react";
 import type {Playlist, Track} from "../types";
+import {PlaylistCover} from "./PlaylistCover";
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds)) return "00:00";
@@ -13,15 +14,12 @@ const formatTime = (seconds: number) => {
 export type PlaylistViewProps = {
   playlists: Playlist[];
   tracks: Track[];
-  selectedTrackId: string;
   TrackCover: ComponentType<{track: Track}>;
   onCreate: (name: string) => Promise<void>;
   onRename: (id: string, name: string) => Promise<void>;
   onDelete: (id: string, name: string) => void;
   onUpdateTracks: (id: string, trackIds: string[]) => Promise<void>;
   onPlay: (playlist: Playlist, shuffle: boolean) => void;
-  onSelectTrack: (trackId: string) => void;
-  /** Export all tracks in order as one merged visualizer video. */
   onExport?: (playlist: Playlist) => void;
   exporting?: boolean;
   busy?: boolean;
@@ -30,28 +28,26 @@ export type PlaylistViewProps = {
 export function PlaylistView({
   playlists,
   tracks,
-  selectedTrackId,
   TrackCover,
   onCreate,
   onRename,
   onDelete,
   onUpdateTracks,
   onPlay,
-  onSelectTrack,
   onExport,
   exporting,
   busy,
 }: PlaylistViewProps) {
-  const [activeId, setActiveId] = useState<string>("");
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("New playlist");
-  const [renamingId, setRenamingId] = useState("");
-  const [renameValue, setRenameValue] = useState("");
-  const [adding, setAdding] = useState(false);
-  const [pickIds, setPickIds] = useState<Set<string>>(new Set());
+  const [editPlaylist, setEditPlaylist] = useState<Playlist | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editIds, setEditIds] = useState<string[]>([]);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragFrom, setDragFrom] = useState<"in" | "out" | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const byId = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
-  const active = playlists.find((p) => p.id === (activeId || playlists[0]?.id)) || null;
 
   const durationOf = (pl: Playlist) =>
     pl.trackIds.reduce((sum, id) => sum + (byId.get(id)?.duration || 0), 0);
@@ -66,42 +62,73 @@ export function PlaylistView({
     }
   };
 
-  const commitRename = async () => {
-    if (!renamingId) return;
-    await onRename(renamingId, renameValue);
-    setRenamingId("");
+  const openEdit = (pl: Playlist) => {
+    setEditPlaylist(pl);
+    setEditName(pl.name);
+    setEditIds([...pl.trackIds]);
   };
 
-  const moveTrack = async (pl: Playlist, index: number, delta: number) => {
-    const next = index + delta;
-    if (next < 0 || next >= pl.trackIds.length) return;
-    const trackIds = [...pl.trackIds];
-    const [item] = trackIds.splice(index, 1);
-    trackIds.splice(next, 0, item);
-    await onUpdateTracks(pl.id, trackIds);
+  const closeEdit = () => {
+    setEditPlaylist(null);
+    setDragId(null);
+    setDragFrom(null);
   };
 
-  const removeFromPlaylist = async (pl: Playlist, trackId: string) => {
-    await onUpdateTracks(pl.id, pl.trackIds.filter((id) => id !== trackId));
-  };
-
-  const addPicked = async () => {
-    if (!active || !pickIds.size) return;
-    setAdding(true);
+  const saveEdit = async () => {
+    if (!editPlaylist) return;
+    setSavingEdit(true);
     try {
-      const set = new Set(active.trackIds);
-      const merged = [...active.trackIds];
-      for (const id of pickIds) {
-        if (!set.has(id)) {
-          set.add(id);
-          merged.push(id);
-        }
+      if (editName.trim() && editName.trim() !== editPlaylist.name) {
+        await onRename(editPlaylist.id, editName.trim());
       }
-      await onUpdateTracks(active.id, merged);
-      setPickIds(new Set());
+      await onUpdateTracks(editPlaylist.id, editIds);
+      closeEdit();
     } finally {
-      setAdding(false);
+      setSavingEdit(false);
     }
+  };
+
+  const outIds = useMemo(() => {
+    const inSet = new Set(editIds);
+    return tracks.filter((t) => !inSet.has(t.id)).map((t) => t.id);
+  }, [tracks, editIds]);
+
+  const onDragStart = (id: string, from: "in" | "out") => (event: DragEvent) => {
+    setDragId(id);
+    setDragFrom(from);
+    event.dataTransfer.setData("text/plain", id);
+    event.dataTransfer.effectAllowed = "move";
+  };
+
+  const dropOnIn = (event: DragEvent) => {
+    event.preventDefault();
+    const id = dragId || event.dataTransfer.getData("text/plain");
+    if (!id) return;
+    setEditIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setDragId(null);
+    setDragFrom(null);
+  };
+
+  const dropOnOut = (event: DragEvent) => {
+    event.preventDefault();
+    const id = dragId || event.dataTransfer.getData("text/plain");
+    if (!id) return;
+    setEditIds((prev) => prev.filter((x) => x !== id));
+    setDragId(null);
+    setDragFrom(null);
+  };
+
+  const reorderIn = (targetId: string) => {
+    if (!dragId || dragFrom !== "in" || dragId === targetId) return;
+    setEditIds((prev) => {
+      const next = prev.filter((x) => x !== dragId);
+      const at = next.indexOf(targetId);
+      if (at < 0) return [...next, dragId];
+      next.splice(at, 0, dragId);
+      return next;
+    });
+    setDragId(null);
+    setDragFrom(null);
   };
 
   return (
@@ -110,7 +137,7 @@ export function PlaylistView({
         <div>
           <span>Playlists</span>
           <h1>Your sets.</h1>
-          <p>Create playlists, queue them, shuffle, and play through the transport.</p>
+          <p>Play, shuffle, export, or edit track membership in a two-pane editor.</p>
         </div>
         <div className="playlist-create-row">
           <input
@@ -126,145 +153,134 @@ export function PlaylistView({
         </div>
       </div>
 
-      <div className="playlist-layout">
-        <div className="playlist-sidebar-list">
-          {playlists.map((pl) => (
-            <button
-              key={pl.id}
-              type="button"
-              className={`playlist-list-item ${active?.id === pl.id ? "selected" : ""}`}
-              onClick={() => setActiveId(pl.id)}
-            >
-              <ListMusic size={14} />
-              <span className="track-copy">
-                <strong>{pl.name}</strong>
-                <small>{pl.trackIds.length} tracks · {formatTime(durationOf(pl))}</small>
-              </span>
-            </button>
-          ))}
-          {!playlists.length && <p className="empty-library">No playlists yet. Create one above.</p>}
-        </div>
+      <div className="playlist-table">
+        {playlists.map((pl) => (
+          <div key={pl.id} className="playlist-table-row">
+            <PlaylistCover trackIds={pl.trackIds} tracksById={byId} size={48} />
+            <div className="track-copy">
+              <strong>{pl.name}</strong>
+              <small>{pl.trackIds.length} tracks · {formatTime(durationOf(pl))}</small>
+            </div>
+            <div className="playlist-row-actions dense">
+              <button type="button" className="secondary-button compact" disabled={!pl.trackIds.length} onClick={() => onPlay(pl, false)} title="Play">
+                <Play size={13} fill="currentColor" /> Play
+              </button>
+              <button type="button" className="secondary-button compact" disabled={!pl.trackIds.length} onClick={() => onPlay(pl, true)} title="Shuffle play">
+                <Shuffle size={13} /> Shuffle
+              </button>
+              {onExport && (
+                <button type="button" className="secondary-button compact" disabled={!pl.trackIds.length || exporting} onClick={() => onExport(pl)} title="Export all">
+                  {exporting ? <LoaderCircle className="spin" size={13} /> : <Clapperboard size={13} />}
+                  Export
+                </button>
+              )}
+              <button type="button" className="secondary-button compact" onClick={() => openEdit(pl)} title="Edit">
+                <Pencil size={13} /> Edit
+              </button>
+              <button type="button" className="icon-btn danger" onClick={() => onDelete(pl.id, pl.name)} title="Delete" aria-label={`Delete ${pl.name}`}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
+        {!playlists.length && (
+          <p className="empty-library">No playlists yet. Create one above, then edit to add tracks.</p>
+        )}
+      </div>
 
-        <div className="playlist-detail">
-          {active ? (
-            <>
-              <div className="playlist-detail-head">
-                {renamingId === active.id ? (
-                  <div className="playlist-rename-row">
-                    <input value={renameValue} onChange={(e) => setRenameValue(e.target.value)} autoFocus onKeyDown={(e) => {
-                      if (e.key === "Enter") void commitRename();
-                      if (e.key === "Escape") setRenamingId("");
-                    }} />
-                    <button type="button" className="icon-btn" onClick={() => void commitRename()} aria-label="Save name"><Check size={14} /></button>
-                    <button type="button" className="icon-btn" onClick={() => setRenamingId("")} aria-label="Cancel rename"><X size={14} /></button>
-                  </div>
-                ) : (
-                  <h2>{active.name}</h2>
-                )}
-                <div className="playlist-actions">
-                  <button type="button" className="secondary-button" onClick={() => onPlay(active, false)} disabled={!active.trackIds.length}>
-                    <Play size={14} fill="currentColor" /> Play
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => onPlay(active, true)} disabled={!active.trackIds.length}>
-                    <Shuffle size={14} /> Shuffle
-                  </button>
-                  {onExport && (
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      title="Export entire playlist as one video (tracks in order, merged)"
-                      onClick={() => onExport(active)}
-                      disabled={!active.trackIds.length || exporting || busy}
-                    >
-                      {exporting ? <LoaderCircle className="spin" size={14} /> : <Clapperboard size={14} />}
-                      {exporting ? "Exporting…" : "Export all"}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    title="Rename"
-                    onClick={() => { setRenamingId(active.id); setRenameValue(active.name); }}
-                  >
-                    <Pencil size={14} />
-                  </button>
-                  <button type="button" className="icon-btn danger" title="Delete playlist" onClick={() => onDelete(active.id, active.name)}>
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="playlist-add-block">
-                <div className="section-label">Add from library</div>
-                <div className="playlist-picker">
-                  {tracks.map((track) => {
-                    const checked = pickIds.has(track.id) || active.trackIds.includes(track.id);
-                    const already = active.trackIds.includes(track.id);
+      {editPlaylist && (
+        <div className="confirm-overlay playlist-edit-overlay" role="presentation" onClick={closeEdit}>
+          <div
+            className="confirm-dialog playlist-edit-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="playlist-edit-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="confirm-dialog-head">
+              <h2 id="playlist-edit-title">Edit playlist</h2>
+              <button type="button" className="confirm-close" onClick={closeEdit} aria-label="Close"><X size={16} /></button>
+            </div>
+            <label className="playlist-edit-name">
+              Name
+              <input value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </label>
+            <p className="save-hint">Drag tracks between columns. Right = in playlist (order top → bottom).</p>
+            <div className="playlist-edit-columns">
+              <div
+                className={`playlist-edit-col ${dragFrom === "out" ? "drag-source" : ""}`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={dropOnOut}
+              >
+                <div className="section-label">Library (not in set)</div>
+                <div className="playlist-edit-list custom-scroll">
+                  {outIds.map((id) => {
+                    const track = byId.get(id);
+                    if (!track) return null;
                     return (
-                      <label key={track.id} className={`playlist-pick-row ${already ? "already" : ""}`}>
-                        <input
-                          type="checkbox"
-                          disabled={already}
-                          checked={checked}
-                          onChange={() => {
-                            if (already) return;
-                            setPickIds((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(track.id)) next.delete(track.id);
-                              else next.add(track.id);
-                              return next;
-                            });
-                          }}
-                        />
+                      <div
+                        key={id}
+                        className="playlist-edit-item"
+                        draggable
+                        onDragStart={onDragStart(id, "out")}
+                        onDoubleClick={() => setEditIds((prev) => [...prev, id])}
+                      >
+                        <GripVertical size={12} className="drag-handle" />
                         <TrackCover track={track} />
                         <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
-                      </label>
+                      </div>
                     );
                   })}
-                  {!tracks.length && <p className="empty-library">Import tracks first.</p>}
+                  {!outIds.length && <p className="empty-library">All tracks are in this playlist.</p>}
                 </div>
-                <button type="button" className="secondary-button" disabled={!pickIds.size || adding} onClick={() => void addPicked()}>
-                  {adding ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />}
-                  Add selected
-                </button>
               </div>
-
-              <div className="playlist-tracks">
-                {active.trackIds.map((id, index) => {
-                  const track = byId.get(id);
-                  if (!track) {
+              <div
+                className={`playlist-edit-col ${dragFrom === "in" ? "drag-source" : ""}`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={dropOnIn}
+              >
+                <div className="section-label">In playlist ({editIds.length})</div>
+                <div className="playlist-edit-list custom-scroll">
+                  {editIds.map((id) => {
+                    const track = byId.get(id);
+                    if (!track) {
+                      return (
+                        <div key={id} className="playlist-edit-item missing">
+                          <span className="track-copy"><strong>Missing</strong><small>{id}</small></span>
+                          <button type="button" className="icon-btn" onClick={() => setEditIds((p) => p.filter((x) => x !== id))}><X size={12} /></button>
+                        </div>
+                      );
+                    }
                     return (
-                      <div key={id} className="library-card missing">
-                        <span className="track-copy"><strong>Missing track</strong><small>{id}</small></span>
-                        <button type="button" className="track-remove" onClick={() => void removeFromPlaylist(active, id)} aria-label="Remove missing">
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    );
-                  }
-                  return (
-                    <div key={id} className={`library-card ${selectedTrackId === id ? "selected" : ""}`}>
-                      <button type="button" className="library-card-main" onClick={() => onSelectTrack(id)} onDoubleClick={() => onPlay({...active, trackIds: [id, ...active.trackIds.filter((t) => t !== id)]}, false)}>
+                      <div
+                        key={id}
+                        className="playlist-edit-item"
+                        draggable
+                        onDragStart={onDragStart(id, "in")}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => { e.preventDefault(); reorderIn(id); }}
+                        onDoubleClick={() => setEditIds((p) => p.filter((x) => x !== id))}
+                      >
+                        <GripVertical size={12} className="drag-handle" />
                         <TrackCover track={track} />
                         <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
-                        <time className="mono">{formatTime(track.duration)}</time>
-                      </button>
-                      <div className="playlist-row-actions">
-                        <button type="button" className="icon-btn" disabled={index === 0} onClick={() => void moveTrack(active, index, -1)} aria-label="Move up"><ChevronUp size={14} /></button>
-                        <button type="button" className="icon-btn" disabled={index === active.trackIds.length - 1} onClick={() => void moveTrack(active, index, 1)} aria-label="Move down"><ChevronDown size={14} /></button>
-                        <button type="button" className="track-remove" onClick={() => void removeFromPlaylist(active, id)} aria-label={`Remove ${track.title}`}><Trash2 size={13} /></button>
                       </div>
-                    </div>
-                  );
-                })}
-                {!active.trackIds.length && <p className="empty-library">This playlist is empty. Add tracks from the library.</p>}
+                    );
+                  })}
+                  {!editIds.length && <p className="empty-library">Drop tracks here from the left.</p>}
+                </div>
               </div>
-            </>
-          ) : (
-            <p className="empty-library">Select or create a playlist.</p>
-          )}
+            </div>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" onClick={closeEdit}>Cancel</button>
+              <button type="button" className="confirm-ok" disabled={savingEdit} onClick={() => void saveEdit()}>
+                {savingEdit ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
+                Save
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

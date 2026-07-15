@@ -1,13 +1,14 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
   ArrowRight, Check, Clapperboard, CloudUpload, FolderOpen, FolderPlus, Library,
-  ListMusic, LoaderCircle, Menu, Music2, Plus, Save, Square, Trash2, X, AudioWaveform,
+  ListMusic, LoaderCircle, Menu, Music2, Play as PlayIcon, Plus, Save, Search, Square, Trash2, X,
 } from "lucide-react";
 import {api} from "./api";
 import {VisualizerCanvas, type VisualizerCanvasHandle} from "./components/VisualizerCanvas";
 import {DiscPlayer} from "./components/DiscPlayer";
 import {TransportBar} from "./components/TransportBar";
 import {PlaylistView} from "./components/PlaylistView";
+import {PlaylistCover} from "./components/PlaylistCover";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -57,9 +58,13 @@ function StatusMark({job}: {job?: RenderJob}) {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("visualize");
+  const [view, setView] = useState<View>("play");
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [libraryQuery, setLibraryQuery] = useState("");
   const [selectedId, setSelectedId] = useState("");
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const [savedRenders, setSavedRenders] = useState<SavedRender[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,6 +133,17 @@ export default function App() {
   const activeJob = useMemo(() => jobs.find((job) => job.trackId === selected?.id && ACTIVE_STATUSES.has(job.status)), [jobs, selected?.id]);
   const dirty = Boolean(selected && (title !== selected.title || artist !== selected.artist));
   const progress = selected?.duration ? Math.min(1, currentTime / selected.duration) : 0;
+  const tracksById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
+  const filteredTracks = useMemo(() => {
+    const q = libraryQuery.trim().toLowerCase();
+    if (!q) return tracks;
+    return tracks.filter((t) =>
+      t.title.toLowerCase().includes(q)
+      || t.artist.toLowerCase().includes(q)
+      || t.album.toLowerCase().includes(q)
+      || t.fileName.toLowerCase().includes(q),
+    );
+  }, [tracks, libraryQuery]);
 
   const mergeTracks = useCallback((serverTracks: Track[]) => {
     const local = clientLibrary.list();
@@ -193,6 +209,20 @@ export default function App() {
   useEffect(() => {
     refresh().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setLoading(false));
   }, [refresh]);
+
+  // Pause visual work & suspend audio graph when the window is backgrounded (RAM/CPU).
+  useEffect(() => {
+    const onVis = () => {
+      const visible = document.visibilityState === "visible";
+      setPageVisible(visible);
+      const ctx = audioContextRef.current;
+      if (!ctx) return;
+      if (visible) void ctx.resume().catch(() => undefined);
+      else void ctx.suspend().catch(() => undefined);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
 
   // Lightweight poll: only re-fetch tracks when the server generation changes (watch folder activity).
   useEffect(() => {
@@ -335,8 +365,9 @@ export default function App() {
       const source = context.createMediaElementSource(audio);
       sourceRef.current = source;
       const nextAnalyser = context.createAnalyser();
-      nextAnalyser.fftSize = 512;
-      nextAnalyser.smoothingTimeConstant = 0.74;
+      // Smaller FFT → less CPU/RAM for live listen mode (export uses offline analysis).
+      nextAnalyser.fftSize = 256;
+      nextAnalyser.smoothingTimeConstant = 0.78;
       const recordDest = context.createMediaStreamDestination();
       recordDestRef.current = recordDest;
       source.connect(nextAnalyser);
@@ -587,9 +618,8 @@ export default function App() {
     };
     setJobs((items) => [job, ...items]);
     // Offline WebCodecs path does not need the live canvas locked; keep UI free.
-    // Realtime fallback still benefits from exportSize if offline fails.
     setExportSize(null);
-    setView("renders");
+    setView("studio");
 
     const controller = new AbortController();
     exportAbortRef.current = controller;
@@ -697,7 +727,7 @@ export default function App() {
     };
     setJobs((items) => [job, ...items]);
     setExportSize(null);
-    setView("renders");
+    setView("studio");
 
     const controller = new AbortController();
     exportAbortRef.current = controller;
@@ -879,15 +909,15 @@ export default function App() {
       return;
     }
     playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
-    setView("visualize");
+    setView("play");
   };
 
   const nav = [
     {id: "library" as const, label: "Library", icon: Library},
     {id: "playlists" as const, label: "Playlists", icon: ListMusic},
+    {id: "play" as const, label: "Play", icon: PlayIcon},
     {id: "import" as const, label: "Import", icon: CloudUpload},
-    {id: "visualize" as const, label: "Visualize", icon: AudioWaveform},
-    {id: "renders" as const, label: "Renders", icon: Clapperboard},
+    {id: "studio" as const, label: "Studio", icon: Clapperboard},
   ];
 
   const seek = useCallback((next: number) => {
@@ -897,31 +927,29 @@ export default function App() {
     }
   }, [selected]);
 
-  const trackList = (
-    <div className="track-list">
-      {tracks.map((track) => (
-        <div className={`track-row ${selected?.id === track.id ? "selected" : ""}`} key={track.id}>
-          <button type="button" className="track-row-main" onClick={() => selectTrack(track.id)}>
-            <TrackCover track={track} />
-            <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
-            <time>{formatTime(track.duration)}</time>
-          </button>
+  const sidebarPlaylists = (
+    <div className="track-list sidebar-playlists custom-scroll">
+      {playlists.map((pl) => (
+        <div className="track-row playlist-side-row" key={pl.id}>
           <button
             type="button"
-            className="track-remove"
-            title="Remove from library"
-            aria-label={`Remove ${track.title}`}
-            disabled={removingId === track.id}
-            onClick={(event) => {event.stopPropagation(); void removeTrack(track.id, track.title);}}
+            className="track-row-main"
+            onClick={() => {
+              setView("playlists");
+              setSidebarOpen(false);
+            }}
+            onDoubleClick={() => playPlaylist(pl, false)}
           >
-            {removingId === track.id ? <LoaderCircle className="spin" size={12} /> : <Trash2 size={12} />}
+            <PlaylistCover trackIds={pl.trackIds} tracksById={tracksById} size={30} />
+            <span className="track-copy">
+              <strong>{pl.name}</strong>
+              <small>{pl.trackIds.length} tracks</small>
+            </span>
           </button>
         </div>
       ))}
-      {!loading && tracks.length === 0 && (
-        <p className="empty-library">
-          {cloudMode ? "Import audio in the browser to get started." : "Import audio or add a watched folder."}
-        </p>
+      {!loading && playlists.length === 0 && (
+        <p className="empty-library">No playlists yet. Create one under Playlists.</p>
       )}
     </div>
   );
@@ -932,7 +960,7 @@ export default function App() {
         ref={audioRef}
         src={selected?.mediaUrl}
         crossOrigin="anonymous"
-        preload="auto"
+        preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => handleTrackEnded()}
@@ -965,31 +993,48 @@ export default function App() {
             </button>
           ))}
         </nav>
-        {(view === "library" || view === "visualize") && (
-          <>
-            <div className="library-heading"><span>Your library</span><button onClick={() => fileInputRef.current?.click()} aria-label="Import audio"><Plus size={16} /></button></div>
-            {trackList}
-          </>
-        )}
+        <div className="library-heading">
+          <span>Playlists</span>
+          <button type="button" onClick={() => {setView("playlists"); setSidebarOpen(false);}} aria-label="Open playlists"><Plus size={16} /></button>
+        </div>
+        {sidebarPlaylists}
       </aside>
 
       <section className="workspace">
         <header className="mobile-header"><button onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><span>PRISMATIC</span></header>
         {view === "library" && (
           <div className="utility-view library-view">
-            <div className="utility-heading">
-              <span>Library</span>
-              <h1>Your collection.</h1>
-              <p>Select a track, open Visualize to preview, or render from the inspector.</p>
+            <div className="utility-heading library-heading-bar">
+              <div>
+                <span>Library</span>
+                <h1>Your collection.</h1>
+                <p>Double-click a track to play. Export videos from Studio.</p>
+              </div>
+              <label className="library-search">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  value={libraryQuery}
+                  onChange={(e) => setLibraryQuery(e.target.value)}
+                  placeholder="Search title, artist, album…"
+                  aria-label="Search library"
+                />
+                {libraryQuery && (
+                  <button type="button" className="icon-btn" onClick={() => setLibraryQuery("")} aria-label="Clear search"><X size={14} /></button>
+                )}
+              </label>
             </div>
-            <div className="library-main-list">
-              {tracks.map((track) => (
+            <div className="library-main-list custom-scroll">
+              {filteredTracks.map((track) => (
                 <div key={track.id} className={`library-card ${selected?.id === track.id ? "selected" : ""}`}>
                   <button
                     type="button"
                     className="library-card-main"
                     onClick={() => selectTrack(track.id)}
-                    onDoubleClick={() => {selectTrack(track.id); setView("visualize");}}
+                    onDoubleClick={() => {
+                      playAfterLoadRef.current = true;
+                      selectTrack(track.id);
+                      setView("play");
+                    }}
                   >
                     <TrackCover track={track} />
                     <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}{track.album ? ` · ${track.album}` : ""} · {track.folder}</small></span>
@@ -1008,10 +1053,11 @@ export default function App() {
                 </div>
               ))}
               {!loading && tracks.length === 0 && <p className="empty-library">No tracks yet. Use Import or watch a folder.</p>}
+              {!loading && tracks.length > 0 && filteredTracks.length === 0 && <p className="empty-library">No matches for “{libraryQuery}”.</p>}
             </div>
           </div>
         )}
-        {view === "visualize" && (
+        {view === "play" && (
           <>
             <div className="stage">
               <VisualizerCanvas
@@ -1019,11 +1065,13 @@ export default function App() {
                 analyser={analyser}
                 waveform={waveform}
                 progress={progress}
-                playing={playing || Boolean(exportSize)}
-                exportSize={exportSize}
+                playing={playing}
+                active={view === "play" && pageVisible}
+                quality="low"
+                exportSize={null}
               />
               {selected && <DiscPlayer key={selected.id} track={selected} playing={playing} currentTime={currentTime} progress={progress} />}
-              {!selected && <div className="stage-empty"><Music2 size={42} /><h1>Import a track to begin</h1></div>}
+              {!selected && <div className="stage-empty"><Music2 size={42} /><h1>Import a track to play</h1></div>}
             </div>
             <TransportBar
               playing={playing}
@@ -1067,7 +1115,6 @@ export default function App() {
           <PlaylistView
             playlists={playlists}
             tracks={tracks}
-            selectedTrackId={selectedId}
             TrackCover={TrackCover}
             busy={loading}
             onCreate={async (name) => {
@@ -1095,7 +1142,6 @@ export default function App() {
               setPlaylists(playlistStore.list());
             }}
             onPlay={playPlaylist}
-            onSelectTrack={selectTrack}
             onExport={(pl) => void startPlaylistExport(pl)}
             exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
           />
@@ -1224,15 +1270,54 @@ export default function App() {
             )}
           </div>
         )}
-        {view === "renders" && (
-          <div className="utility-view renders-view">
+        {view === "studio" && (
+          <div className="utility-view studio-view">
             <div className="utility-heading row">
-              <div><span>Renders</span><h1>Export history.</h1></div>
+              <div>
+                <span>Studio</span>
+                <h1>Export visuals.</h1>
+                <p>Encode a track (or whole playlist from Playlists) as video. Playback lives under Play.</p>
+              </div>
               {!cloudMode && (
                 <button className="secondary-button" onClick={() => void api.openOutput()}><FolderOpen size={16} />Open output folder</button>
               )}
             </div>
-            <div className="render-list">
+            <div className="studio-export-card">
+              <div className="section-label">Selected track</div>
+              <strong className="studio-track-name">{selected?.title || "No track selected"}</strong>
+              <p className="save-hint">{selected ? `${selected.artist} · ${selected.format}` : "Pick a track in Library first."}</p>
+              <div className="studio-settings-grid">
+                <label>Resolution
+                  <select value={resolution} onChange={(event) => setResolution(event.target.value as ResolutionPreset)}>
+                    <option value="720p">1280 × 720 · HD</option>
+                    <option value="1080p">1920 × 1080 · Full HD</option>
+                    <option value="4k">3840 × 2160 · 4K</option>
+                    <option value="square">1080 × 1080 · Square</option>
+                    <option value="portrait">1080 × 1920 · Portrait</option>
+                  </select>
+                </label>
+                <label>Audio bitrate
+                  <select value={audioBitrate} onChange={(event) => setAudioBitrate(Number(event.target.value) as 128 | 192 | 256 | 320)}>
+                    <option value="128">128 kbps</option>
+                    <option value="192">192 kbps</option>
+                    <option value="256">256 kbps</option>
+                    <option value="320">320 kbps</option>
+                  </select>
+                </label>
+              </div>
+              <p className="save-hint mono">{visualsFileName(title || selected?.title || "Track")}</p>
+              <button className="render-button" onClick={() => void startRender()} disabled={!selected || Boolean(activeJob)}>
+                <span>{activeJob ? activeJob.stage : "Export video"}</span>
+                {activeJob ? <LoaderCircle className="spin" size={18} /> : <ArrowRight size={18} />}
+              </button>
+              {activeJob && (
+                <button className="cancel-inline" onClick={() => void cancelJob(activeJob.id)} disabled={cancellingId === activeJob.id}>
+                  {cancellingId === activeJob.id ? "Stopping…" : "Cancel current export"}
+                </button>
+              )}
+            </div>
+            <div className="section-label" style={{marginTop: 20}}>Export history</div>
+            <div className="render-list custom-scroll">
               {jobs.map((job) => {
                 const running = ACTIVE_STATUSES.has(job.status);
                 return (
@@ -1260,51 +1345,50 @@ export default function App() {
                 );
               })}
               {jobs.length === 0 && savedRenders.map((render) => <article className="render-row saved" key={render.url}><Check size={15} /><div><strong>{render.fileName}</strong><span>Saved master</span></div><a href={render.url} target="_blank" rel="noreferrer">View video</a></article>)}
-              {jobs.length === 0 && savedRenders.length === 0 && <div className="empty-renders"><Clapperboard size={30} /><strong>No renders yet</strong><span>Finished masters will appear here.</span></div>}
+              {jobs.length === 0 && savedRenders.length === 0 && <div className="empty-renders"><Clapperboard size={30} /><strong>No exports yet</strong><span>Finished masters will appear here.</span></div>}
             </div>
           </div>
         )}
       </section>
 
-      <aside className="inspector">
-        <section className="track-title-panel"><span>Track</span><h1>{selected?.title || "No track selected"}</h1></section>
+      <aside className="inspector custom-scroll">
+        <section className="track-title-panel">
+          <span>{view === "studio" ? "Export track" : "Now playing"}</span>
+          <h1>{selected?.title || "No track selected"}</h1>
+        </section>
         <section className="inspector-section">
           <div className="section-label">Metadata {dirty && <span className="unsaved">Unsaved</span>}</div>
           <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} disabled={!selected} /></label>
           <label>Artist<input value={artist} onChange={(event) => setArtist(event.target.value)} disabled={!selected} /></label>
           {dirty && <button className="save-button" onClick={() => void saveMetadata()} disabled={saving}><Save size={14} />{saving ? "Saving…" : "Save changes"}</button>}
         </section>
-        <section className="inspector-section render-settings">
-          <div className="section-label">Render settings</div>
-          <label>Resolution
-            <select value={resolution} onChange={(event) => setResolution(event.target.value as ResolutionPreset)}>
-              <option value="720p">1280 × 720 · HD</option><option value="1080p">1920 × 1080 · Full HD</option><option value="4k">3840 × 2160 · 4K</option><option value="square">1080 × 1080 · Square</option><option value="portrait">1080 × 1920 · Portrait</option>
-            </select>
-          </label>
-          <label>Audio bitrate
-            <select value={audioBitrate} onChange={(event) => setAudioBitrate(Number(event.target.value) as 128 | 192 | 256 | 320)}>
-              <option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option>
-            </select>
-          </label>
-          <p className="save-hint mono">
-            Offline browser encode (faster than real-time) · {visualsFileName(title || selected?.title || "Track")}
-          </p>
-          <button className="render-button" onClick={() => void startRender()} disabled={!selected || Boolean(activeJob)}>
-            <span>{activeJob ? activeJob.stage : "Export video"}</span>
-            {activeJob ? <LoaderCircle className="spin" size={18} /> : <ArrowRight size={18} />}
-          </button>
-          {activeJob && (
-            <button className="cancel-inline" onClick={() => void cancelJob(activeJob.id)} disabled={cancellingId === activeJob.id}>
-              {cancellingId === activeJob.id ? "Stopping…" : "Cancel current render"}
+        {view === "play" && (
+          <section className="status-panel">
+            <div className="section-label">Player</div>
+            <div className="status-line"><strong>{playing ? "Playing" : "Paused"}</strong></div>
+            <p>{queue.sourceLabel} · {selected ? `${selected.format}` : "—"} · visuals optimized for listen mode</p>
+            <button type="button" className="secondary-button" style={{marginTop: 12}} onClick={() => setView("studio")} disabled={!selected}>
+              <Clapperboard size={14} /> Export this track…
             </button>
-          )}
-        </section>
-        <section className="status-panel">
-          <div className="section-label">Status</div>
-          <div className="status-line"><StatusMark job={activeJob} /><strong>{activeJob?.stage || (selected ? "Ready to export (browser)" : "Waiting for audio")}</strong></div>
-          <p>{activeJob?.error || (selected ? `${selected.format} · ${selected.folder} · ${selected.bitrate ? `${Math.round(selected.bitrate / 1000)} kbps source` : "source ready"}` : "Import an audio file to begin.")}</p>
-          {activeJob && <div className="status-progress"><i style={{width: `${activeJob.progress}%`}} /></div>}
-        </section>
+          </section>
+        )}
+        {view === "studio" && (
+          <section className="status-panel">
+            <div className="section-label">Status</div>
+            <div className="status-line"><StatusMark job={activeJob} /><strong>{activeJob?.stage || (selected ? "Ready to export" : "Waiting for audio")}</strong></div>
+            <p>{activeJob?.error || (selected ? `${selected.format} · ${selected.folder}` : "Select a track in Library.")}</p>
+            {activeJob && <div className="status-progress"><i style={{width: `${activeJob.progress}%`}} /></div>}
+          </section>
+        )}
+        {(view === "library" || view === "playlists" || view === "import") && (
+          <section className="status-panel">
+            <div className="section-label">Library</div>
+            <p>{tracks.length} tracks · {playlists.length} playlists</p>
+            <button type="button" className="secondary-button" style={{marginTop: 12}} disabled={!selected} onClick={() => {setView("play");}}>
+              <PlayIcon size={14} /> Open player
+            </button>
+          </section>
+        )}
       </aside>
 
       {error && <button className="error-toast" onClick={() => setError("")}><span>{error}</span><X size={16} /></button>}

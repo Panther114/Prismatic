@@ -5,6 +5,10 @@ type Props = {
   waveform: number[];
   progress: number;
   playing: boolean;
+  /** When false, stop the animation loop (tab hidden / not on Play view). */
+  active?: boolean;
+  /** "low" caps DPR and frame rate for lighter RAM/GPU while listening. */
+  quality?: "high" | "low";
   /** When set, lock canvas pixel size for browser export (instead of layout size). */
   exportSize?: {width: number; height: number} | null;
 };
@@ -108,7 +112,8 @@ function drawWaterBackground(
   context.globalCompositeOperation = "lighter";
 
   // Soft caustic / refraction patches across the full plane
-  for (let i = 0; i < 7; i += 1) {
+  const causticCount = 7;
+  for (let i = 0; i < causticCount; i += 1) {
     const u = hash01(i * 13.7 + 2);
     const v = hash01(i * 7.1 + 5);
     const px = w * (0.1 + u * 0.8 + Math.sin(t * 0.13 + i) * 0.025);
@@ -209,13 +214,13 @@ function randomRippleAnchor(seed: number): {x: number; y: number; hue: number} {
 }
 
 export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(function VisualizerCanvas(
-  {analyser, waveform, progress, playing, exportSize = null},
+  {analyser, waveform, progress, playing, active = true, quality = "high", exportSize = null},
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lastBins = useRef(new Float32Array(96));
-  const propsRef = useRef({analyser, waveform, progress, playing, exportSize});
-  propsRef.current = {analyser, waveform, progress, playing, exportSize};
+  const propsRef = useRef({analyser, waveform, progress, playing, active, quality, exportSize});
+  propsRef.current = {analyser, waveform, progress, playing, active, quality, exportSize};
 
   useImperativeHandle(ref, () => ({
     getCanvas: () => canvasRef.current,
@@ -227,6 +232,7 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
     const context = canvas.getContext("2d", {alpha: false, desynchronized: true});
     if (!context) return;
     let animationFrame = 0;
+    let idleTimer = 0;
     let lastDraw = 0;
     let activeAnalyser: AnalyserNode | null = null;
     let frequencyBytes: Uint8Array | null = null;
@@ -234,7 +240,8 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
     let lastBeatMs = -9999;
     let rippleSeed = 0;
     const ripples: WaterRipple[] = [];
-    const viewport = {width: 1, height: 1, ratio: Math.min(2, window.devicePixelRatio || 1)};
+    const viewport = {width: 1, height: 1, ratio: 1};
+    let pageVisible = typeof document === "undefined" ? true : document.visibilityState === "visible";
     const resize = () => {
       const locked = propsRef.current.exportSize;
       if (locked) {
@@ -250,7 +257,9 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
       const rect = canvas.getBoundingClientRect();
       viewport.width = Math.max(1, rect.width);
       viewport.height = Math.max(1, rect.height);
-      viewport.ratio = Math.min(2, window.devicePixelRatio || 1);
+      // Cap DPR in low quality / play mode to cut GPU memory significantly
+      const dprCap = propsRef.current.quality === "low" ? 1 : Math.min(1.5, window.devicePixelRatio || 1);
+      viewport.ratio = dprCap;
       const pixelWidth = Math.round(viewport.width * viewport.ratio);
       const pixelHeight = Math.round(viewport.height * viewport.ratio);
       if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
@@ -270,9 +279,22 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
 
     const draw = (now: number) => {
       const current = propsRef.current;
+      const shouldRun = (current.active && pageVisible) || Boolean(current.exportSize);
+      if (!shouldRun) {
+        // Fully pause GPU work when tab/backgrounded or not on Play
+        idleTimer = window.setTimeout(() => {
+          animationFrame = requestAnimationFrame(draw);
+        }, 500);
+        return;
+      }
       // Keep export size locked every frame (exportSize can appear mid-session).
       if (current.exportSize) resize();
-      const interval = current.playing || current.exportSize ? 1000 / 60 : 1000 / 24;
+      // Low quality: ~30fps while playing, ~12fps idle; high: 60/24
+      const interval = current.exportSize
+        ? 1000 / 60
+        : current.quality === "low"
+          ? (current.playing ? 1000 / 30 : 1000 / 12)
+          : (current.playing ? 1000 / 60 : 1000 / 24);
       if (now - lastDraw < interval) {
         animationFrame = requestAnimationFrame(draw);
         return;
@@ -360,8 +382,10 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
         context.lineWidth = 0.65;
         context.stroke();
       }
-      for (let layer = 11; layer >= 0; layer -= 1) {
-        const depth = layer / 11;
+      // Fewer ribbon layers in low quality to cut fill/stroke cost
+      const ribbonLayers = current.quality === "low" ? 6 : 12;
+      for (let layer = ribbonLayers - 1; layer >= 0; layer -= 1) {
+        const depth = layer / Math.max(1, ribbonLayers - 1);
         const register = layer % 3;
         const driver = register === 0 ? bass : register === 1 ? mid : treble;
         const threshold = 0.1 + ((layer * 29) % 5) * 0.085;
@@ -395,7 +419,8 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
         context.stroke();
       }
 
-      for (let layer = 0; layer < 3; layer += 1) {
+      const upperLayers = current.quality === "low" ? 1 : 3;
+      for (let layer = 0; layer < upperLayers; layer += 1) {
         context.beginPath();
         for (let point = 0; point <= 100; point += 1) {
           const xNorm = point / 100;
@@ -415,10 +440,12 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
         context.stroke();
       }
 
-      // Shadow is expensive; one shared glow + solid bars preserves the look at lower cost.
+      // Shadow is expensive; skip in low quality (big GPU win)
       const barWidth = w / bins.length;
-      context.shadowColor = colorAt(0.5, 0.55 + energy * 0.25);
-      context.shadowBlur = 10 + energy * 14;
+      if (current.quality !== "low") {
+        context.shadowColor = colorAt(0.5, 0.55 + energy * 0.25);
+        context.shadowBlur = 10 + energy * 14;
+      }
       for (let i = 0; i < bins.length; i += 1) {
         const x = i * barWidth + barWidth * 0.28;
         const centerBias = 0.5 + Math.abs(i / bins.length - 0.55);
@@ -441,13 +468,16 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
       animationFrame = requestAnimationFrame(draw);
     };
     const onVisibility = () => {
-      if (!document.hidden) animationFrame = requestAnimationFrame(draw);
-      else cancelAnimationFrame(animationFrame);
+      pageVisible = document.visibilityState === "visible";
+      cancelAnimationFrame(animationFrame);
+      window.clearTimeout(idleTimer);
+      if (pageVisible) animationFrame = requestAnimationFrame(draw);
     };
     document.addEventListener("visibilitychange", onVisibility);
     animationFrame = requestAnimationFrame(draw);
     return () => {
       cancelAnimationFrame(animationFrame);
+      window.clearTimeout(idleTimer);
       resizeObserver.disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
     };

@@ -47,7 +47,8 @@ export type RenderJob = {
 };
 
 export type SavedRender = {fileName: string; url: string};
-export type View = "library" | "playlists" | "import" | "renders" | "visualize";
+/** play = listen + live visuals; studio = export + render history (former visualize+renders) */
+export type View = "library" | "playlists" | "play" | "import" | "studio";
 
 export type Playlist = {
   id: string;
