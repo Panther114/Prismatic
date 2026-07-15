@@ -13,3 +13,7 @@ healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+
+# Kill Vite→Caddy SPA mode; we run Node/Express (see nixpacks.toml).
+# Also set this in Railway dashboard Variables if the plan still shows caddy.
+# NIXPACKS_SPA_CADDY=false

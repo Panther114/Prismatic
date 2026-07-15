@@ -1,8 +1,15 @@
+# Empty workspace root (keeps pnpm happy) + install policy for CI/Railway.
 packages: []
 
+# Only these packages may run lifecycle scripts (skips Electron binary download).
+onlyBuiltDependencies:
+  - esbuild
+  - "@esbuild/linux-x64"
+  - "@esbuild/darwin-arm64"
+  - "@esbuild/darwin-x64"
+  - "@esbuild/win32-x64"
+  - "@napi-rs/canvas"
+
 allowBuilds:
-  "@google/genai": true
   esbuild: true
-  onnxruntime-node: true
-  protobufjs: true
-  sharp: true
+  "@napi-rs/canvas": true

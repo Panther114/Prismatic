@@ -1,11 +1,14 @@
-# Lightweight Railway host — SPA + Express only (no ffmpeg, no Electron, no Caddy).
+# Express serves the SPA — do not use Caddy (Nixpacks SPA path for Vite).
+# https://nixpacks.com/docs/providers/node#caddy
 providers = ["node"]
+
+[variables]
+NIXPACKS_SPA_CADDY = "false"
 
 [phases.setup]
 nixPkgs = ["nodejs_22", "pnpm"]
 
 [phases.install]
-# Install is owned here; do not re-run in buildCommand (avoids double work).
 cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]
