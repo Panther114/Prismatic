@@ -544,24 +544,37 @@ export default function App() {
     try {
       const lastName = Array.from(files).at(-1)?.name;
       let all: Track[];
+      let skipped = 0;
       if (cloudModeRef.current) {
-        all = await clientLibrary.importFiles(files);
+        const result = await clientLibrary.importFiles(files);
+        all = result.tracks;
+        skipped = result.skipped;
       } else {
         try {
-          // Server multer clones files into the shared music library.
-          const serverTracks = await api.importAudio(files);
-          all = mergeTracks(serverTracks, false);
+          // Server multer clones files into the shared music library (skips replicates).
+          const payload = await api.importAudio(files);
+          if (Array.isArray(payload)) {
+            all = mergeTracks(payload, false);
+          } else {
+            all = mergeTracks(payload.tracks, false);
+            skipped = payload.skipped || 0;
+          }
         } catch {
           // Cloud or restricted host — keep audio only in the browser.
           cloudModeRef.current = true;
           setCloudMode(true);
-          all = await clientLibrary.importFiles(files);
+          const result = await clientLibrary.importFiles(files);
+          all = result.tracks;
+          skipped = result.skipped;
         }
       }
       setTracks(all);
       const imported = all.find((track) => track.fileName === lastName);
       if (imported) setSelectedId(imported.id);
       setView("library");
+      if (skipped > 0) {
+        setError(`Skipped ${skipped} already in library (no duplicate files written).`);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

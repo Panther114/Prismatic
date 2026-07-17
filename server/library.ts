@@ -537,6 +537,48 @@ export class MusicLibrary {
   }
 
   /**
+   * Remove re-import clones left by older builds: when both `Song.mp3` and
+   * `Song-<base36>.mp3` exist with the same byte size, delete the suffixed copy.
+   * Safe for names that legitimately end in -word (only removes if base file exists + same size).
+   */
+  async purgeImportDuplicates(): Promise<number> {
+    const suffixRe = /^(.+)-[a-z0-9]{5,12}(\.[^.]+)$/i;
+    let entries;
+    try {
+      entries = await fs.readdir(this.musicDirectory, {withFileTypes: true});
+    } catch {
+      return 0;
+    }
+
+    const audioNames = entries
+      .filter((entry) => entry.isFile() && AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
+      .map((entry) => entry.name);
+    const nameSet = new Set(audioNames);
+    let removed = 0;
+
+    for (const name of audioNames) {
+      const match = suffixRe.exec(name);
+      if (!match) continue;
+      const canonical = `${match[1]}${match[2]}`;
+      if (!nameSet.has(canonical)) continue;
+      const dupPath = path.join(this.musicDirectory, name);
+      const basePath = path.join(this.musicDirectory, canonical);
+      try {
+        const [dupStat, baseStat] = await Promise.all([fs.stat(dupPath), fs.stat(basePath)]);
+        if (!dupStat.isFile() || !baseStat.isFile() || dupStat.size !== baseStat.size) continue;
+        await fs.unlink(dupPath);
+        nameSet.delete(name);
+        removed += 1;
+      } catch {
+        // ignore individual failures
+      }
+    }
+
+    if (removed) this.markDirty();
+    return removed;
+  }
+
+  /**
    * Clone audio files from an arbitrary folder into the shared music library.
    * maxDepth 0 = only direct children; 1 = one nested level; etc.
    * Returns how many files were copied (originals are never modified).

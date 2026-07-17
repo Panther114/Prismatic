@@ -160,11 +160,24 @@ export class ClientLibrary {
     }
   }
 
-  async importFiles(files: FileList | File[]) {
+  async importFiles(files: FileList | File[]): Promise<{tracks: Track[]; imported: string[]; skipped: number}> {
     const list = Array.from(files).filter((file) => AUDIO_EXT.test(file.name) || file.type.startsWith("audio/"));
     if (!list.length) throw new Error("No supported audio files selected");
 
+    const imported: string[] = [];
+    let skipped = 0;
+
     for (const file of list) {
+      // Skip exact re-imports: same file name + same byte size already in the browser library.
+      const existing = this.tracks.find((track) => track.fileName === file.name);
+      if (existing) {
+        const extras = this.extras.get(existing.id);
+        if (extras && extras.file.size === file.size) {
+          skipped += 1;
+          continue;
+        }
+      }
+
       const {duration, waveform} = await decodeDurationAndWaveform(file);
       const mediaUrl = URL.createObjectURL(file);
       const cover = await tryCoverBlob(file);
@@ -202,8 +215,9 @@ export class ClientLibrary {
       this.tracks.push(track);
       this.extras.set(id, {file, waveform, objectUrls});
       void this.persist(id);
+      imported.push(file.name);
     }
-    return this.list();
+    return {tracks: this.list(), imported, skipped};
   }
 
   update(id: string, update: {title: string; artist: string}) {

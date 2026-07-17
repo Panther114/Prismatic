@@ -89,7 +89,8 @@ if (localFeatures) {
     destination: musicDirectory,
     filename: (_request, file, callback) => {
       let name = safeMusicFileName(file.originalname);
-      // Avoid clobbering an existing library file with a different import
+      // If a same-named file already exists, write under a temp name first.
+      // The import handler drops true replicates (same size) instead of keeping them.
       if (existsSync(path.join(musicDirectory, name))) {
         const ext = path.extname(name);
         const stem = path.basename(name, ext);
@@ -106,6 +107,12 @@ if (localFeatures) {
       callback(null, allowed.has(path.extname(file.originalname).toLowerCase()));
     },
   });
+
+  // One-time cleanup of prior re-import duplicates (Name.mp3 + Name-xxxx.mp3 same size).
+  const purged = await library.purgeImportDuplicates();
+  if (purged > 0) {
+    console.log(`Removed ${purged} duplicate music file(s) from library`);
+  }
 
   app.get("/api/tracks", async (_request, response, next) => {
     try {
@@ -219,8 +226,36 @@ if (localFeatures) {
     try {
       const files = (request.files as Express.Multer.File[] | undefined) || [];
       // Multer already wrote clones into musicDirectory — originals are untouched.
-      await library.noteImportedFiles(files.map((file) => file.filename || file.originalname));
-      response.status(201).json(await library.list());
+      // Drop re-imports that match an existing library file (same safe name + same size).
+      const kept: string[] = [];
+      let skipped = 0;
+      for (const file of files) {
+        const writtenName = file.filename || safeMusicFileName(file.originalname);
+        const writtenPath = path.join(musicDirectory, writtenName);
+        const canonical = safeMusicFileName(file.originalname);
+        const canonicalPath = path.join(musicDirectory, canonical);
+
+        if (writtenName !== canonical && existsSync(canonicalPath)) {
+          try {
+            const [existing, uploaded] = await Promise.all([
+              fs.stat(canonicalPath),
+              fs.stat(writtenPath),
+            ]);
+            if (existing.isFile() && uploaded.isFile() && existing.size === uploaded.size) {
+              await fs.unlink(writtenPath).catch(() => undefined);
+              skipped += 1;
+              continue;
+            }
+          } catch {
+            // Fall through and keep the uploaded file if comparison fails.
+          }
+        }
+        kept.push(writtenName);
+      }
+
+      await library.noteImportedFiles(kept);
+      const tracks = await library.list();
+      response.status(201).json({tracks, imported: kept, skipped});
     } catch (error) {
       next(error);
     }

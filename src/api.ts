@@ -72,7 +72,10 @@ export const api = {
   importAudio: (files: FileList | File[]) => {
     const form = new FormData();
     Array.from(files).forEach((file) => form.append("audio", file));
-    return json<Track[]>("/api/import", {method: "POST", body: form});
+    return json<{tracks: Track[]; imported: string[]; skipped: number} | Track[]>("/api/import", {
+      method: "POST",
+      body: form,
+    });
   },
   /** Clone audio from a disk folder into the shared music library (local mode). */
   importFolder: (folderPath: string, maxDepth = 0) =>
