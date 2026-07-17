@@ -231,7 +231,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .secondary-button.compact { height: 30px; padding: 0 10px; font-size: 10px; gap: 5px; }
 
 .playlist-edit-overlay { z-index: 40; }
-.playlist-edit-dialog { width: min(920px, 96vw); max-height: min(88vh, 720px); display: flex; flex-direction: column; }
+.playlist-edit-dialog { width: min(1840px, 96vw); max-height: min(88vh, 720px); display: flex; flex-direction: column; }
 .playlist-edit-name { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; color: #9ba1ac; font-size: 11px; }
 .playlist-edit-name input { height: 36px; padding: 0 11px; border: 1px solid #3b424d; border-radius: 2px; background: #0b0f16; color: #e2e0da; }
 .playlist-edit-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; flex: 1; margin-bottom: 12px; }
