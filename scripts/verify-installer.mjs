@@ -84,6 +84,61 @@ if (legacy.length && version !== "1.0.0") {
   console.warn(`WARN: legacy artifact still present: ${legacy.join(", ")} (safe to delete; use the ${version} file)`);
 }
 
+// Slim-package guards: no node_modules / native canvas / esbuild in the shipped app.
+const unpackedRoot = path.join(releaseDir, "win-unpacked");
+const badPaths = [
+  path.join(unpackedRoot, "resources", "app.asar.unpacked", "node_modules"),
+  path.join(unpackedRoot, "resources", "app", "node_modules"),
+];
+for (const bad of badPaths) {
+  try {
+    await fs.access(bad);
+    console.error(`FAIL: packaged app still contains ${path.relative(releaseDir, bad)}`);
+    process.exit(1);
+  } catch {
+    console.log(`OK no bloat path: ${path.relative(releaseDir, bad)}`);
+  }
+}
+
+// Locale packs: only en-US (plus electron always keeps en-US).
+try {
+  const localesDir = path.join(unpackedRoot, "locales");
+  const locales = await fs.readdir(localesDir);
+  const extra = locales.filter((n) => n.endsWith(".pak") && n !== "en-US.pak");
+  if (extra.length > 8) {
+    // Electron may keep a few; more than a handful means electronLanguages failed.
+    console.warn(`WARN: ${extra.length} non en-US locale packs still present (expected few or none)`);
+  } else {
+    console.log(`OK locales trimmed: ${locales.length} pack(s)`);
+  }
+} catch {
+  console.warn("WARN: could not inspect locales/");
+}
+
+// Size budget: installed tree should stay well under the old ~430 MB.
+let installedBytes = 0;
+async function walkSize(dir) {
+  const entries = await fs.readdir(dir, {withFileTypes: true});
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) await walkSize(full);
+    else installedBytes += (await fs.stat(full)).size;
+  }
+}
+await walkSize(unpackedRoot);
+const installedMb = installedBytes / 1024 / 1024;
+const installerMb = stat.size / 1024 / 1024;
+console.log(`OK installed size: ${installedMb.toFixed(1)} MB`);
+console.log(`OK installer size: ${installerMb.toFixed(1)} MB`);
+if (installedMb > 310) {
+  console.error(`FAIL: installed size ${installedMb.toFixed(1)} MB exceeds 310 MB budget (packaging likely regressed)`);
+  process.exit(1);
+}
+if (installerMb > 110) {
+  console.error(`FAIL: installer ${installerMb.toFixed(1)} MB exceeds 110 MB budget`);
+  process.exit(1);
+}
+
 console.log("");
 console.log(`VERIFY PASS — Prismatic ${version}`);
 console.log(installerPath);

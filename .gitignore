@@ -8,6 +8,7 @@ dist-server/
 .out/
 release/
 release-build/
+desktop-stage/
 # Keep Electron packaging assets in build/; ignore other build junk
 build/*
 !build/icon.png

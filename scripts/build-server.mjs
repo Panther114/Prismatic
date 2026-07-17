@@ -21,6 +21,9 @@ const esbuild = await import(pathToFileURL(esbuildPath).href);
 const outfile = path.join(root, "dist-server", "index.mjs");
 await fs.mkdir(path.dirname(outfile), {recursive: true});
 
+// Sourcemaps only for local debug builds — desktop packages strip them in stage-desktop.
+const withSourceMap = process.env.PRISMATIC_SERVER_SOURCEMAP === "1";
+
 await esbuild.build({
   entryPoints: [path.join(root, "server", "index.ts")],
   bundle: true,
@@ -29,17 +32,20 @@ await esbuild.build({
   target: "node20",
   outfile,
   // Bundle express, music-metadata, multer, etc. into one file.
+  // Desktop / production start run this file with zero node_modules.
   packages: "bundle",
   external: [
     "electron",
+    // Dev-only HMR middleware (never taken when NODE_ENV=production).
     "vite",
-    // optional native canvases / platform binaries
+    // Server-side video path is disabled; never ship native canvas in the desktop app.
     "@napi-rs/canvas",
     "@napi-rs/canvas-*",
     "fsevents",
   ],
-  // Allow marked external packages to stay external even if nested
-  sourcemap: true,
+  // Tree-shake production path; keep dynamic import("vite") external for `pnpm dev`.
+  sourcemap: withSourceMap,
+  minify: process.env.PRISMATIC_SERVER_MINIFY !== "0",
   logLevel: "info",
   banner: {
     js: `

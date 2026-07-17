@@ -5,7 +5,7 @@
 [build]
 builder = "NIXPACKS"
 # Install already runs in nixpacks install phase — only build here.
-buildCommand = "pnpm build"
+buildCommand = "pnpm build && pnpm build:server"
 
 [deploy]
 startCommand = "pnpm start"

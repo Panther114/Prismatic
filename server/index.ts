@@ -481,6 +481,8 @@ if (isProduction) {
     });
   });
 } else {
+  // Dev only: Vite HMR middleware. `vite` is external in dist-server so
+  // production desktop/cloud never needs that package on disk.
   const viteMod = await import("vite");
   const vite = await viteMod.createServer({
     root,

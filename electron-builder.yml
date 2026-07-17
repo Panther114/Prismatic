@@ -1,35 +1,43 @@
 # Desktop packaging — production NSIS installer/uninstaller
+# App content comes from desktop-stage/ (see scripts/stage-desktop.mjs):
+# only dist + dist-server + electron/main.cjs + icons. No node_modules.
 appId: app.prismatic.desktop
 productName: Prismatic
 copyright: Copyright © Prismatic
 directories:
+  # Staged slim app (zero npm deps) — electron-builder will not pack node_modules.
+  app: desktop-stage
   # Separate folder avoids Windows EPERM locks on release/win-unpacked from prior runs
   output: release-build
+  # Icons/NSIS resources still read from the monorepo build/ folder
   buildResources: build
 # Distinct filename so a new build is never confused with an old Setup 1.0.0.exe
 artifactName: "${productName}-Setup-${version}-${os}-${arch}.${ext}"
 files:
-  - dist/**/*
-  - dist-server/**/*
-  - server/**/*
-  - electron/**/*
-  - build/icon.png
-  - build/icon.ico
-  - public/music-note.png
-  - public/favicon.svg
-  - package.json
-  - node_modules/**/*
+  - "**/*"
+  - "!**/*.map"
+  - "!**/*.log"
 asar: true
-# CRITICAL: Express serves SPA from real files. Keeping dist inside asar caused
+# Express serves SPA from real files. Keeping dist inside asar caused
 # upgrades to look "stuck" when combined with Chromium service-worker cache.
+# dist-server stays unpacked so ESM dynamic import is reliable under Electron.
 asarUnpack:
   - dist/**/*
   - dist-server/**/*
   - build/**/*
-  - node_modules/@napi-rs/**/*
-  - node_modules/@esbuild/**/*
+# Drop non-English Chromium locale packs (~tens of MB of *.pak files).
+electronLanguages:
+  - en-US
+npmRebuild: false
+nodeGypRebuild: false
+# Maximum compression for the NSIS payload (slower build, smaller installer).
+compression: maximum
+# Drop any monorepo optional natives electron-builder may still resolve.
+afterPack: scripts/electron-after-pack.mjs
 extraMetadata:
   main: electron/main.cjs
+  dependencies: {}
+  optionalDependencies: {}
 win:
   icon: build/icon.ico
   target:
@@ -47,7 +55,7 @@ nsis:
   shortcutName: Prismatic
   runAfterFinish: true
   deleteAppDataOnUninstall: false
-  include: build/installer.nsh
+  include: installer.nsh
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
   installerHeaderIcon: build/icon.ico

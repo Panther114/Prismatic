@@ -9,12 +9,14 @@ NIXPACKS_SPA_CADDY = "false"
 nixPkgs = ["nodejs_22", "pnpm"]
 
 [phases.install]
-# Production deps only: vite/tsx/express are in dependencies.
-# Omits electron/electron-builder → no ERR_PNPM_IGNORED_BUILDS on Railway.
-cmds = ["pnpm install --frozen-lockfile --prod"]
+# Full install so Vite can build the SPA; electron/electron-builder stay
+# optional peer tooling and are not required at runtime on Railway.
+# Prefer frozen lockfile; fall back if lock is mid-migration.
+cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]
-cmds = ["pnpm build"]
+# Bundle SPA + self-contained Express server (start uses node dist-server).
+cmds = ["pnpm build && pnpm build:server"]
 
 [start]
 cmd = "pnpm start"
