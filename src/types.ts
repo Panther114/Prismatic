@@ -48,7 +48,9 @@ export type RenderJob = {
 
 export type SavedRender = {fileName: string; url: string};
 /** play = listen + live visuals; studio = export + render history (former visualize+renders) */
-export type View = "library" | "playlists" | "play" | "import" | "studio";
+export type View = "library" | "playlists" | "play" | "import" | "studio" | "settings";
+export type LibraryMode = "songs" | "albums" | "artists";
+export type LibrarySort = "title" | "artist" | "album" | "duration";
 
 export type Playlist = {
   id: string;
@@ -61,10 +63,16 @@ export type Playlist = {
 export type RepeatMode = "off" | "all" | "one";
 
 export type PlayerPrefs = {
+  schemaVersion?: 2;
   shuffle: boolean;
   repeat: RepeatMode;
   volume: number;
   muted: boolean;
+  visualizerQuality?: "low" | "high";
+  resumeBehavior?: "track" | "position";
+  libraryMode?: LibraryMode;
+  librarySort?: LibrarySort;
+  compactPlayer?: boolean;
 };
 
 export type QueueSource =

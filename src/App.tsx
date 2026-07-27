@@ -1,14 +1,16 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
   ArrowRight, Check, Clapperboard, CloudUpload, FolderOpen, FolderPlus, Library,
-  ListMusic, LoaderCircle, Menu, Music2, Play as PlayIcon, Plus, Save, Search, Square, Trash2, X,
+  ListMusic, LoaderCircle, Menu, Music2, Play as PlayIcon, Plus, Save, Search, Settings, Square, Trash2, X,
 } from "lucide-react";
-import {api} from "./api";
+import {api, isTauri} from "./api";
 import {VisualizerCanvas, type VisualizerCanvasHandle} from "./components/VisualizerCanvas";
 import {DiscPlayer} from "./components/DiscPlayer";
-import {TransportBar} from "./components/TransportBar";
 import {PlaylistView} from "./components/PlaylistView";
 import {PlaylistCover} from "./components/PlaylistCover";
+import {LibraryView} from "./components/LibraryView";
+import {PersistentPlayer} from "./components/PersistentPlayer";
+import {QueueDrawer} from "./components/QueueDrawer";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -18,16 +20,23 @@ import {
   createQueue,
   currentId,
   cycleRepeat,
+  enqueueLast,
+  enqueueNext,
+  loadQueue,
   jumpTo,
   onTrackEnded,
   removeTrackFromQueue,
+  reorderQueue,
   setRepeat,
+  saveQueue,
   setShuffle,
   skipNext,
   skipPrev,
   type QueueState,
 } from "./lib/playbackQueue";
 import type {Playlist, RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
+import type {LibraryMode, LibrarySort} from "./types";
+import {setCompactPlayer} from "./lib/compactPlayer";
 
 const ACTIVE_STATUSES = new Set(["queued", "analyzing", "rendering"]);
 
@@ -58,9 +67,13 @@ function StatusMark({job}: {job?: RenderJob}) {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("play");
+  const [view, setView] = useState<View>("library");
   const [tracks, setTracks] = useState<Track[]>([]);
   const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryMode, setLibraryMode] = useState<LibraryMode>("songs");
+  const [librarySort, setLibrarySort] = useState<LibrarySort>("title");
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [compactPlayer, setCompactPlayerState] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [pageVisible, setPageVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState === "visible",
@@ -197,10 +210,11 @@ export default function App() {
     });
     setQueue((q) => {
       if (q.order.length) return q;
-      return createQueue(
+      const fallback = createQueue(
         nextTracks.map((t) => t.id),
         {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library"},
       );
+      return loadQueue(nextTracks.map((track) => track.id), fallback);
     });
 
     // Shared offline prefs (disk) for local web + Electron
@@ -213,6 +227,8 @@ export default function App() {
         shuffle: prefs.shuffle,
         repeat: prefs.repeat,
       }));
+      setLibraryMode(prefs.libraryMode || "songs");
+      setLibrarySort(prefs.librarySort || "title");
     } catch {
       // keep seeded prefs
     }
@@ -241,18 +257,37 @@ export default function App() {
   }, [mergeTracks]);
 
   useEffect(() => {
+    if (!selected?.clientOnly || !selected.mediaUrl.startsWith("client-audio:")) return;
+    let cancelled = false;
+    void clientLibrary.materialize(selected.id)
+      .then((materialized) => {
+        if (!cancelled && materialized) {
+          setTracks((items) => items.map((item) => item.id === materialized.id ? materialized : item));
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, selected?.mediaUrl]);
+
+  useEffect(() => {
     refresh().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setLoading(false));
   }, [refresh]);
 
-  // Pause visual work & suspend audio graph when the window is backgrounded (RAM/CPU).
+  // Hidden pages pause visual/UI work only. Audio output must remain alive.
   useEffect(() => {
     const onVis = () => {
       const visible = document.visibilityState === "visible";
       setPageVisible(visible);
+      if (!visible) return;
+      setCurrentTime(audioRef.current?.currentTime || 0);
       const ctx = audioContextRef.current;
-      if (!ctx) return;
-      if (visible) void ctx.resume().catch(() => undefined);
-      else void ctx.suspend().catch(() => undefined);
+      if (ctx?.state === "suspended" && !audioRef.current?.paused) {
+        void ctx.resume().catch(() => undefined);
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
@@ -306,6 +341,13 @@ export default function App() {
       const wave = clientLibrary.waveform(selected.id);
       waveformCacheRef.current.set(selected.id, wave);
       setWaveform(wave);
+    } else if (selected.waveformUrl.startsWith("tauri-waveform:")) {
+      void api.waveform(selected.id)
+        .then((wave) => {
+          waveformCacheRef.current.set(selected.id, wave);
+          setWaveform(wave);
+        })
+        .catch(() => setWaveform([]));
     } else {
       abort = new AbortController();
       fetch(selected.waveformUrl, {signal: abort.signal})
@@ -334,7 +376,7 @@ export default function App() {
     return () => {
       abort?.abort();
     };
-  }, [selected?.id]);
+  }, [selected?.id, selected?.mediaUrl]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = muted ? 0 : volume;
@@ -342,14 +384,20 @@ export default function App() {
 
   useEffect(() => {
     void savePlayerPrefs(offlineModeRef.current, {
+      schemaVersion: 2,
       shuffle: queue.shuffle,
       repeat: queue.repeat,
       volume,
       muted,
+      visualizerQuality: "low",
+      resumeBehavior: "track",
+      libraryMode,
+      librarySort,
+      compactPlayer,
     });
-  }, [queue.shuffle, queue.repeat, volume, muted]);
+  }, [queue.shuffle, queue.repeat, volume, muted, libraryMode, librarySort, compactPlayer]);
 
-  // Prefetch next track in queue for snappier skips
+  // Metadata-only prefetch avoids buffering or decoding two complete songs.
   useEffect(() => {
     const q = queue;
     const nextId = q.order[q.index + 1] || (q.repeat === "all" ? q.order[0] : null);
@@ -358,7 +406,7 @@ export default function App() {
     if (!track?.mediaUrl) return;
     if (!prefetchRef.current) prefetchRef.current = new Audio();
     const el = prefetchRef.current;
-    el.preload = "auto";
+    el.preload = "metadata";
     if (el.src !== track.mediaUrl) el.src = track.mediaUrl;
   }, [queue, selectedId, tracks]);
 
@@ -367,7 +415,9 @@ export default function App() {
     if (!audio) return;
     const tick = () => {
       setCurrentTime(audio.currentTime);
-      if (!audio.paused && !audio.ended) timeRafRef.current = requestAnimationFrame(tick);
+      if (!audio.paused && !audio.ended && document.visibilityState === "visible") {
+        timeRafRef.current = requestAnimationFrame(tick);
+      }
     };
     const onPlay = () => {
       cancelAnimationFrame(timeRafRef.current);
@@ -377,16 +427,19 @@ export default function App() {
       cancelAnimationFrame(timeRafRef.current);
       setCurrentTime(audio.currentTime);
     };
+    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
     audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
     audio.addEventListener("ended", onPause);
     audio.addEventListener("seeked", onPause);
+    audio.addEventListener("timeupdate", onTimeUpdate);
     return () => {
       cancelAnimationFrame(timeRafRef.current);
       audio.removeEventListener("play", onPlay);
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("ended", onPause);
       audio.removeEventListener("seeked", onPause);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
     };
   }, [selected?.id]);
 
@@ -491,6 +544,74 @@ export default function App() {
   };
 
   useEffect(() => {
+    saveQueue(queue);
+  }, [queue]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !selected) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: selected.title,
+      artist: selected.artist,
+      album: selected.album,
+      artwork: selected.coverUrl && !selected.coverUrl.endsWith("music-note.png")
+        ? [{src: selected.coverUrl}]
+        : undefined,
+    });
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+    const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+      ["play", () => {
+        if (audioRef.current?.paused) void togglePlaybackRef.current();
+      }],
+      ["pause", () => {
+        if (!audioRef.current?.paused) audioRef.current?.pause();
+      }],
+      ["previoustrack", () => selectAdjacent(-1)],
+      ["nexttrack", () => selectAdjacent(1)],
+      ["seekto", (details) => {
+        const audio = audioRef.current;
+        if (audio && typeof details.seekTime === "number") audio.currentTime = details.seekTime;
+      }],
+      ["seekbackward", (details) => {
+        const audio = audioRef.current;
+        if (audio) audio.currentTime = Math.max(0, audio.currentTime - (details.seekOffset || 10));
+      }],
+      ["seekforward", (details) => {
+        const audio = audioRef.current;
+        if (audio) audio.currentTime = Math.min(audio.duration || Number.MAX_SAFE_INTEGER, audio.currentTime + (details.seekOffset || 10));
+      }],
+    ];
+    for (const [action, handler] of handlers) {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Optional action is not available in this browser.
+      }
+    }
+    return () => {
+      for (const [action] of handlers) {
+        try {
+          navigator.mediaSession.setActionHandler(action, null);
+        } catch {
+          // Optional action.
+        }
+      }
+    };
+  }, [playing, selected?.id, queue.index]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !selected || selected.duration <= 0) return;
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: selected.duration,
+        playbackRate: audioRef.current?.playbackRate || 1,
+        position: Math.min(selected.duration, Math.max(0, currentTime)),
+      });
+    } catch {
+      // Some browsers reject position state until metadata is fully loaded.
+    }
+  }, [currentTime, selected?.duration]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName || "";
@@ -503,6 +624,39 @@ export default function App() {
       if (event.key === "m" || event.key === "M") {
         event.preventDefault();
         setMuted((m) => !m);
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setView("library");
+        window.requestAnimationFrame(() => {
+          document.querySelector<HTMLInputElement>('[aria-label="Search library"]')?.focus();
+        });
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        if (isTauri) void importFiles([]);
+        else fileInputRef.current?.click();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "q") {
+        event.preventDefault();
+        setQueueOpen((open) => !open);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        const audio = audioRef.current;
+        if (!audio) return;
+        event.preventDefault();
+        const direction = event.key === "ArrowRight" ? 1 : -1;
+        audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + direction * 5));
+        setCurrentTime(audio.currentTime);
+        return;
+      }
+      if (event.altKey && ["1", "2", "3"].includes(event.key)) {
+        event.preventDefault();
+        setView(event.key === "1" ? "library" : event.key === "2" ? "playlists" : "studio");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -537,8 +691,8 @@ export default function App() {
     }
   };
 
-  const importFiles = async (files: FileList | File[]) => {
-    if (!files.length) return;
+  const importFiles = async (files: FileList | File[] = []) => {
+    if (!files.length && !isTauri) return;
     setImporting(true);
     setError("");
     try {
@@ -569,7 +723,9 @@ export default function App() {
         }
       }
       setTracks(all);
-      const imported = all.find((track) => track.fileName === lastName);
+      const imported = lastName
+        ? all.find((track) => track.fileName === lastName)
+        : all.find((track) => !tracks.some((existing) => existing.id === track.id));
       if (imported) setSelectedId(imported.id);
       setView("library");
       if (skipped > 0) {
@@ -958,16 +1114,40 @@ export default function App() {
       return;
     }
     playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
-    setView("play");
   };
 
   const nav = [
     {id: "library" as const, label: "Library", icon: Library},
     {id: "playlists" as const, label: "Playlists", icon: ListMusic},
-    {id: "play" as const, label: "Play", icon: PlayIcon},
-    {id: "import" as const, label: "Import", icon: CloudUpload},
     {id: "studio" as const, label: "Studio", icon: Clapperboard},
+    {id: "settings" as const, label: "Settings", icon: Settings},
   ];
+
+  const playTrack = (trackId: string) => {
+    if (trackId === selected?.id) {
+      void togglePlayback();
+      return;
+    }
+    playAfterLoadRef.current = true;
+    selectTrack(trackId);
+  };
+
+  const addTrackToPlaylist = async (playlistId: string, trackId: string) => {
+    const playlist = playlists.find((item) => item.id === playlistId);
+    if (!playlist || playlist.trackIds.includes(trackId)) return;
+    await playlistStore.update(playlistId, {trackIds: [...playlist.trackIds, trackId]});
+    setPlaylists(playlistStore.list());
+  };
+
+  const toggleCompact = async () => {
+    const next = !compactPlayer;
+    try {
+      await setCompactPlayer(next);
+      setCompactPlayerState(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   const seek = useCallback((next: number) => {
     if (audioRef.current && selected) {
@@ -1054,7 +1234,7 @@ export default function App() {
 
       <section className="workspace">
         <header className="mobile-header"><button onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><span>PRISMATIC</span></header>
-        {view === "library" && (
+        {false && view === "library" && (
           <div className="utility-view library-view">
             <div className="utility-heading library-heading-bar">
               <div>
@@ -1109,6 +1289,29 @@ export default function App() {
             </div>
           </div>
         )}
+        {view === "library" && (
+          <LibraryView
+            tracks={tracks}
+            playlists={playlists}
+            selectedId={selected?.id || ""}
+            loading={loading}
+            query={libraryQuery}
+            mode={libraryMode}
+            sort={librarySort}
+            TrackCover={TrackCover}
+            onQuery={setLibraryQuery}
+            onMode={setLibraryMode}
+            onSort={setLibrarySort}
+            onSelect={selectTrack}
+            onPlay={playTrack}
+            onPlayNext={(id) => setQueue((current) => enqueueNext(current, id))}
+            onAddQueue={(id) => setQueue((current) => enqueueLast(current, id))}
+            onAddPlaylist={(playlistId, trackId) => void addTrackToPlaylist(playlistId, trackId)}
+            onRemove={(id, trackTitle) => void removeTrack(id, trackTitle)}
+            onImportFiles={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()}
+            onImportFolder={() => isTauri ? void browseImportFolder() : folderInputRef.current?.click()}
+          />
+        )}
         {view === "play" && (
           <>
             <div className="stage">
@@ -1125,42 +1328,6 @@ export default function App() {
               {selected && <DiscPlayer key={selected.id} track={selected} playing={playing} currentTime={currentTime} progress={progress} />}
               {!selected && <div className="stage-empty"><Music2 size={42} /><h1>Import a track to play</h1></div>}
             </div>
-            <TransportBar
-              playing={playing}
-              currentTime={currentTime}
-              duration={selected?.duration || 0}
-              waveform={waveform}
-              volume={volume}
-              muted={muted}
-              shuffle={queue.shuffle}
-              repeat={queue.repeat}
-              sourceLabel={queue.sourceLabel}
-              onTogglePlay={() => void togglePlayback()}
-              onPrev={() => selectAdjacent(-1)}
-              onNext={() => selectAdjacent(1)}
-              onSeek={seek}
-              onVolume={(value) => {
-                setVolume(value);
-                if (value > 0) {
-                  lastVolumeRef.current = value;
-                  setMuted(false);
-                } else {
-                  setMuted(true);
-                }
-              }}
-              onToggleMute={() => {
-                setMuted((m) => {
-                  if (m) {
-                    setVolume(lastVolumeRef.current || 0.86);
-                    return false;
-                  }
-                  if (volume > 0) lastVolumeRef.current = volume;
-                  return true;
-                });
-              }}
-              onToggleShuffle={() => setQueue((q) => setShuffle(q, !q.shuffle))}
-              onCycleRepeat={() => setQueue((q) => setRepeat(q, cycleRepeat(q.repeat)))}
-            />
           </>
         )}
         {view === "playlists" && (
@@ -1198,11 +1365,11 @@ export default function App() {
             exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
           />
         )}
-        {view === "import" && (
+        {view === "settings" && (
           <div className="utility-view import-view">
             <div className="utility-heading">
-              <span>Import</span>
-              <h1>Add audio.</h1>
+              <span>Settings</span>
+              <h1>Library and storage.</h1>
               <p>
                 {cloudMode
                   ? "Cloud host: audio stays offline in this browser only (not shared with the desktop app)."
@@ -1210,7 +1377,7 @@ export default function App() {
                 {" · "}MP3, WAV, FLAC, M4A, AAC, OGG, Opus
               </p>
             </div>
-            <button className="drop-zone" onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault(); void importFiles(event.dataTransfer.files);}}>
+            <button className="drop-zone" onClick={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault(); void importFiles(event.dataTransfer.files);}}>
               {importing ? <LoaderCircle className="spin" size={26} /> : <CloudUpload size={26} strokeWidth={1.4} />}
               <strong>{importing ? "Importing & copying…" : "Drop audio here"}</strong>
               <span>or choose files</span>
@@ -1435,7 +1602,7 @@ export default function App() {
             {activeJob && <div className="status-progress"><i style={{width: `${activeJob.progress}%`}} /></div>}
           </section>
         )}
-        {(view === "library" || view === "playlists" || view === "import") && (
+        {(view === "library" || view === "playlists" || view === "settings") && (
           <section className="status-panel">
             <div className="section-label">Library</div>
             <p>{tracks.length} tracks · {playlists.length} playlists</p>
@@ -1445,6 +1612,68 @@ export default function App() {
           </section>
         )}
       </aside>
+
+      <QueueDrawer
+        open={queueOpen}
+        queue={queue}
+        tracksById={tracksById}
+        onClose={() => setQueueOpen(false)}
+        onPlay={(id) => {
+          playAfterLoadRef.current = true;
+          setQueue((current) => jumpTo(current, id));
+          setSelectedId(id);
+        }}
+        onRemove={(id) => setQueue((current) => removeTrackFromQueue(current, id))}
+        onMove={(from, to) => setQueue((current) => reorderQueue(current, from, to))}
+        onClearUpcoming={() => setQueue((current) => {
+          const order = current.order.slice(0, Math.max(0, current.index) + 1);
+          const retained = new Set(order);
+          return {
+            ...current,
+            order,
+            baseOrder: current.baseOrder.filter((id) => retained.has(id)),
+            updatedAt: new Date().toISOString(),
+          };
+        })}
+      />
+
+      <PersistentPlayer
+        track={selected}
+        playing={playing}
+        currentTime={currentTime}
+        duration={selected?.duration || 0}
+        volume={volume}
+        muted={muted}
+        shuffle={queue.shuffle}
+        repeat={queue.repeat}
+        compact={compactPlayer}
+        onTogglePlay={() => void togglePlayback()}
+        onPrev={() => selectAdjacent(-1)}
+        onNext={() => selectAdjacent(1)}
+        onSeek={seek}
+        onVolume={(value) => {
+          setVolume(value);
+          if (value > 0) {
+            lastVolumeRef.current = value;
+            setMuted(false);
+          }
+        }}
+        onToggleMute={() => {
+          setMuted((current) => {
+            if (current) {
+              setVolume(lastVolumeRef.current || 0.86);
+              return false;
+            }
+            if (volume > 0) lastVolumeRef.current = volume;
+            return true;
+          });
+        }}
+        onToggleShuffle={() => setQueue((current) => setShuffle(current, !current.shuffle))}
+        onCycleRepeat={() => setQueue((current) => setRepeat(current, cycleRepeat(current.repeat)))}
+        onOpenNowPlaying={() => setView("play")}
+        onToggleQueue={() => setQueueOpen((open) => !open)}
+        onToggleCompact={() => void toggleCompact()}
+      />
 
       {error && <button className="error-toast" onClick={() => setError("")}><span>{error}</span><X size={16} /></button>}
 

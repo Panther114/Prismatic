@@ -8,6 +8,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")) as {version: string};
 
 export default defineConfig({
+  base: "./",
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),

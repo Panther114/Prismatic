@@ -1,5 +1,12 @@
 import type {Track} from "../types";
-import {idbDeleteTrack, idbListTracks, idbPutTrack, type StoredClientTrack} from "./clientIdb";
+import {
+  idbDeleteTrack,
+  idbGetTrackAudio,
+  idbGetTrackCover,
+  idbListTrackMetadata,
+  idbPutTrack,
+  type StoredClientTrack,
+} from "./clientIdb";
 
 const AUDIO_EXT = /\.(mp3|wav|flac|m4a|aac|ogg|opus)$/i;
 
@@ -54,7 +61,7 @@ async function tryCoverBlob(file: File): Promise<{url: string; buffer?: ArrayBuf
 }
 
 export type ClientTrackExtras = {
-  file: File;
+  file?: File;
   waveform: number[];
   objectUrls: string[];
 };
@@ -83,27 +90,17 @@ export class ClientLibrary {
     this.hydrated = true;
     if (typeof indexedDB === "undefined") return this.list();
     try {
-      const stored = await idbListTracks();
+      const stored = await idbListTrackMetadata();
       for (const row of stored) {
         if (this.tracks.some((t) => t.id === row.id)) continue;
-        const audioBlob = new Blob([row.audio], {type: row.audioType || "audio/mpeg"});
-        const file = new File([audioBlob], row.fileName, {type: row.audioType || "audio/mpeg"});
-        const mediaUrl = URL.createObjectURL(audioBlob);
-        let coverUrl = "/music-note.png";
-        const objectUrls = [mediaUrl];
-        if (row.cover && row.cover.byteLength) {
-          const coverBlob = new Blob([row.cover], {type: row.coverType || "image/jpeg"});
-          coverUrl = URL.createObjectURL(coverBlob);
-          objectUrls.push(coverUrl);
-        }
         const track: Track = {
           id: row.id,
           sourceId: "browser",
           fileName: row.fileName,
           relativePath: row.fileName,
           folder: "Browser",
-          mediaUrl,
-          coverUrl,
+          mediaUrl: `client-audio:${row.id}`,
+          coverUrl: "/music-note.png",
           waveformUrl: `client-waveform:${row.id}`,
           title: row.title,
           artist: row.artist,
@@ -114,7 +111,7 @@ export class ClientLibrary {
           clientOnly: true,
         };
         this.tracks.push(track);
-        this.extras.set(row.id, {file, waveform: row.waveform || [], objectUrls});
+        this.extras.set(row.id, {waveform: row.waveform || [], objectUrls: []});
       }
     } catch (error) {
       console.warn("Client library hydrate failed", error);
@@ -122,12 +119,38 @@ export class ClientLibrary {
     return this.list();
   }
 
+  /** Load only the selected track's bytes and cover into memory. */
+  async materialize(id: string): Promise<Track | null> {
+    const track = this.tracks.find((item) => item.id === id);
+    const extras = this.extras.get(id);
+    if (!track || !extras) return null;
+    if (!track.mediaUrl.startsWith("client-audio:")) return {...track};
+    const [audio, cover] = await Promise.all([idbGetTrackAudio(id), idbGetTrackCover(id)]);
+    if (!audio) return null;
+    const audioBlob = new Blob([audio.audio], {type: audio.audioType || "audio/mpeg"});
+    const file = new File([audioBlob], audio.fileName, {type: audio.audioType || "audio/mpeg"});
+    const mediaUrl = URL.createObjectURL(audioBlob);
+    const objectUrls = [mediaUrl];
+    let coverUrl = "/music-note.png";
+    if (cover?.cover?.byteLength) {
+      const coverBlob = new Blob([cover.cover], {type: cover.coverType || "image/jpeg"});
+      coverUrl = URL.createObjectURL(coverBlob);
+      objectUrls.push(coverUrl);
+    }
+    extras.file = file;
+    extras.objectUrls.push(...objectUrls);
+    track.mediaUrl = mediaUrl;
+    track.coverUrl = coverUrl;
+    return {...track};
+  }
+
   private async persist(id: string) {
     const track = this.tracks.find((t) => t.id === id);
     const extras = this.extras.get(id);
-    if (!track || !extras) return;
+    if (!track || !extras?.file) return;
+    const file = extras.file;
     try {
-      const audio = await extras.file.arrayBuffer();
+      const audio = await file.arrayBuffer();
       let cover: ArrayBuffer | undefined;
       let coverType: string | undefined;
       if (track.coverUrl.startsWith("blob:")) {
@@ -150,7 +173,7 @@ export class ClientLibrary {
         format: track.format,
         waveform: extras.waveform,
         audio,
-        audioType: extras.file.type || "audio/mpeg",
+        audioType: file.type || "audio/mpeg",
         cover,
         coverType,
       };
@@ -172,7 +195,7 @@ export class ClientLibrary {
       const existing = this.tracks.find((track) => track.fileName === file.name);
       if (existing) {
         const extras = this.extras.get(existing.id);
-        if (extras && extras.file.size === file.size) {
+        if (extras?.file && extras.file.size === file.size) {
           skipped += 1;
           continue;
         }

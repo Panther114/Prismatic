@@ -9,12 +9,14 @@ dist-server/
 release/
 release-build/
 desktop-stage/
-# Keep Electron packaging assets in build/; ignore other build junk
+# Keep packaging assets in build/; ignore other build junk
 build/*
 !build/icon.png
 !build/icon.ico
 !build/installer.nsh
 *.tsbuildinfo
+src-tauri/target/
+src-tauri/gen/
 
 # Prismatic local state & user data
 .prismatic/

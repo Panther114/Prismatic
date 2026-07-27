@@ -1,13 +1,13 @@
 {
   "name": "prismatic",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
   "author": "Prismatic",
   "description": "Prismatic — cinematic music visualizer & player. Browser-side export keeps the host lightweight.",
   "type": "module",
-  "main": "electron/main.cjs",
+  "packageManager": "pnpm@10.28.2",
   "engines": {
-    "node": ">=22"
+    "node": ">=20.19"
   },
   "scripts": {
     "dev": "tsx server/index.ts",
@@ -17,18 +17,22 @@
     "start:ts": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm build && pnpm build:server",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "pnpm test && pnpm check && tauri build --bundles nsis",
+    "dist:win": "pnpm tauri:build && node scripts/verify-tauri-installer.mjs",
     "prepare:sample": "tsx scripts/prepare-sample.ts",
     "render:sample": "tsx scripts/render-sample.ts",
-    "stage:desktop": "node scripts/stage-desktop.mjs",
-    "electron:dev": "pnpm build && pnpm build:server && cross-env NODE_ENV=production PRISMATIC_LOCAL=1 electron .",
-    "electron:build": "pnpm build && pnpm build:server && node scripts/stage-desktop.mjs && electron-builder --win nsis --config electron-builder.yml",
-    "dist:win": "pnpm electron:build && node scripts/verify-installer.mjs",
-    "verify:installer": "node scripts/verify-installer.mjs"
+    "verify:installer": "node scripts/verify-tauri-installer.mjs"
   },
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.2.8",
     "@fontsource/ibm-plex-sans": "^5.2.7",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "cross-env": "^7.0.3",
     "express": "^5.1.0",
     "fft.js": "^4.0.4",
@@ -45,11 +49,10 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^37.2.0",
-    "electron-builder": "^26.0.12",
+    "@tauri-apps/cli": "^2.11.3",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
     "vite": "^7.0.5"
-  },
-  "packageManager": "pnpm@11.7.0"
+  }
 }

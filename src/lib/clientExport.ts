@@ -201,24 +201,19 @@ async function exportOfflineWebCodecs(options: ClientExportOptions): Promise<{bl
     const srcRate = analysis.sampleRate;
     const ratio = srcRate / audioSampleRate;
     const outLen = Math.max(1, Math.floor(src.length / ratio));
-    const resampled = new Float32Array(outLen);
-    for (let i = 0; i < outLen; i += 1) {
-      const s = i * ratio;
-      const i0 = Math.floor(s);
-      const i1 = Math.min(src.length - 1, i0 + 1);
-      const t = s - i0;
-      resampled[i] = src[i0] * (1 - t) + src[i1] * t;
-    }
     const frameSize = 960; // 20ms @ 48k
-    for (let offset = 0, frameIndex = 0; offset < resampled.length; offset += frameSize, frameIndex += 1) {
+    for (let offset = 0, frameIndex = 0; offset < outLen; offset += frameSize, frameIndex += 1) {
       if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
-      const slice = resampled.subarray(offset, Math.min(resampled.length, offset + frameSize));
-      if (slice.length < 64) break;
-      const data = slice.length === frameSize ? slice : (() => {
-        const pad = new Float32Array(frameSize);
-        pad.set(slice);
-        return pad;
-      })();
+      const sampleCount = Math.min(frameSize, outLen - offset);
+      if (sampleCount < 64) break;
+      const data = new Float32Array(frameSize);
+      for (let i = 0; i < sampleCount; i += 1) {
+        const sourcePosition = (offset + i) * ratio;
+        const i0 = Math.floor(sourcePosition);
+        const i1 = Math.min(src.length - 1, i0 + 1);
+        const t = sourcePosition - i0;
+        data[i] = src[i0] * (1 - t) + src[i1] * t;
+      }
       const timestamp = Math.round((frameIndex * frameSize / audioSampleRate) * 1_000_000);
       const audioData = new AudioData({
         format: "f32-planar",
@@ -232,7 +227,7 @@ async function exportOfflineWebCodecs(options: ClientExportOptions): Promise<{bl
       audioEncoder.encode(audioData);
       audioData.close();
       if (frameIndex % 50 === 0) {
-        onProgress?.(46 + Math.round((offset / resampled.length) * 8), "Encoding audio…");
+        onProgress?.(46 + Math.round((offset / outLen) * 8), "Encoding audio…");
         await new Promise((r) => setTimeout(r, 0));
       }
     }
@@ -530,24 +525,19 @@ export async function exportPlaylistClientVideo(
       const srcRate = analysis.sampleRate;
       const ratio = srcRate / audioSampleRate;
       const outLen = Math.max(1, Math.floor(src.length / ratio));
-      const resampled = new Float32Array(outLen);
-      for (let i = 0; i < outLen; i += 1) {
-        const s = i * ratio;
-        const i0 = Math.floor(s);
-        const i1 = Math.min(src.length - 1, i0 + 1);
-        const t = s - i0;
-        resampled[i] = src[i0] * (1 - t) + src[i1] * t;
-      }
       const frameSize = 960;
-      for (let offset = 0, frameIndex = 0; offset < resampled.length; offset += frameSize, frameIndex += 1) {
+      for (let offset = 0, frameIndex = 0; offset < outLen; offset += frameSize, frameIndex += 1) {
         if (signal?.aborted) throw new DOMException("Export cancelled", "AbortError");
-        const slice = resampled.subarray(offset, Math.min(resampled.length, offset + frameSize));
-        if (slice.length < 64) break;
-        const data = slice.length === frameSize ? slice : (() => {
-          const pad = new Float32Array(frameSize);
-          pad.set(slice);
-          return pad;
-        })();
+        const sampleCount = Math.min(frameSize, outLen - offset);
+        if (sampleCount < 64) break;
+        const data = new Float32Array(frameSize);
+        for (let i = 0; i < sampleCount; i += 1) {
+          const sourcePosition = (offset + i) * ratio;
+          const i0 = Math.floor(sourcePosition);
+          const i1 = Math.min(src.length - 1, i0 + 1);
+          const t = sourcePosition - i0;
+          data[i] = src[i0] * (1 - t) + src[i1] * t;
+        }
         const absoluteSample = audioSampleOffset + frameIndex * frameSize;
         const timestamp = Math.round((absoluteSample / audioSampleRate) * 1_000_000);
         const audioData = new AudioData({
@@ -611,4 +601,3 @@ export async function exportPlaylistClientVideo(
   onProgress?.(100, "Playlist export complete");
   return {blob, objectUrl, fileName: safeName};
 }
-

@@ -9,10 +9,14 @@ import "@fontsource/jetbrains-mono/400.css";
 import App from "./App";
 import "./styles.css";
 
-/** Electron loads via http://127.0.0.1 — must NOT use the web service worker (it cached old shells). */
-const isElectron =
+/** Desktop shells must never use the web service worker; stale shells can mask upgrades. */
+const isDesktop =
   typeof navigator !== "undefined"
-  && (/\bElectron\//.test(navigator.userAgent) || new URLSearchParams(location.search).get("desktop") === "1");
+  && (
+    "__TAURI_INTERNALS__" in window
+    || /\bElectron\//.test(navigator.userAgent)
+    || new URLSearchParams(location.search).get("desktop") === "1"
+  );
 
 async function purgeServiceWorkers() {
   if (!("serviceWorker" in navigator)) return;
@@ -40,8 +44,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 (window as unknown as {__APP_VERSION__?: string}).__APP_VERSION__ =
   typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "";
 
-if (isElectron) {
-  // Always drop any SW left over from older desktop builds
+if (isDesktop) {
+  // Always drop any service worker left over from older desktop builds.
   void purgeServiceWorkers();
 } else if (import.meta.env.PROD && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {

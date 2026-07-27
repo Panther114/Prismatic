@@ -4,10 +4,16 @@ import {api} from "../api";
 const KEY = "prismatic.playerPrefs";
 
 const defaults: PlayerPrefs = {
+  schemaVersion: 2,
   shuffle: false,
   repeat: "off",
   volume: 0.86,
   muted: false,
+  visualizerQuality: "low",
+  resumeBehavior: "track",
+  libraryMode: "songs",
+  librarySort: "title",
+  compactPlayer: false,
 };
 
 function parseRepeat(value: unknown): RepeatMode {
@@ -20,10 +26,18 @@ function normalize(raw: Partial<PlayerPrefs> | null | undefined): PlayerPrefs {
     ? Math.min(1, Math.max(0, raw.volume))
     : defaults.volume;
   return {
+    schemaVersion: 2,
     shuffle: Boolean(raw?.shuffle),
     repeat: parseRepeat(raw?.repeat),
     volume,
     muted: Boolean(raw?.muted),
+    visualizerQuality: raw?.visualizerQuality === "high" ? "high" : "low",
+    resumeBehavior: raw?.resumeBehavior === "position" ? "position" : "track",
+    libraryMode: raw?.libraryMode === "albums" || raw?.libraryMode === "artists" ? raw.libraryMode : "songs",
+    librarySort: raw?.librarySort === "artist" || raw?.librarySort === "album" || raw?.librarySort === "duration"
+      ? raw.librarySort
+      : "title",
+    compactPlayer: Boolean(raw?.compactPlayer),
   };
 }
 

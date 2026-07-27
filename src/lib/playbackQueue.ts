@@ -1,6 +1,7 @@
 import type {RepeatMode} from "../types";
 
 export type QueueState = {
+  version?: 2;
   /** Ordered track ids for playback (may be shuffled). */
   order: string[];
   /** Unshuffled source order for restore. */
@@ -9,6 +10,7 @@ export type QueueState = {
   shuffle: boolean;
   repeat: RepeatMode;
   sourceLabel: string;
+  updatedAt?: string;
 };
 
 export function createQueue(
@@ -30,13 +32,77 @@ export function createQueue(
     }
   }
   return {
+    version: 2,
     order,
     baseOrder,
     index: order.length ? index : -1,
     shuffle,
     repeat: options.repeat ?? "off",
     sourceLabel: options.sourceLabel || "Library",
+    updatedAt: new Date().toISOString(),
   };
+}
+
+const QUEUE_KEY = "prismatic.queue.v2";
+
+export function loadQueue(trackIds: string[], fallback: QueueState): QueueState {
+  try {
+    const raw = JSON.parse(localStorage.getItem(QUEUE_KEY) || "null") as Partial<QueueState> | null;
+    if (!raw || !Array.isArray(raw.order) || !Array.isArray(raw.baseOrder)) return fallback;
+    const available = new Set(trackIds);
+    const order = raw.order.filter((id): id is string => typeof id === "string" && available.has(id));
+    const baseOrder = raw.baseOrder.filter((id): id is string => typeof id === "string" && available.has(id));
+    if (!order.length) return fallback;
+    const current = typeof raw.index === "number" ? raw.order[raw.index] : null;
+    const index = current ? Math.max(0, order.indexOf(current)) : 0;
+    return {
+      version: 2,
+      order,
+      baseOrder: baseOrder.length ? baseOrder : [...order],
+      index,
+      shuffle: Boolean(raw.shuffle),
+      repeat: raw.repeat === "all" || raw.repeat === "one" ? raw.repeat : "off",
+      sourceLabel: typeof raw.sourceLabel === "string" ? raw.sourceLabel : "Library",
+      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export function saveQueue(queue: QueueState) {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify({...queue, version: 2, updatedAt: new Date().toISOString()}));
+  } catch {
+    // Storage may be disabled; playback continues in memory.
+  }
+}
+
+export function enqueueNext(queue: QueueState, trackId: string): QueueState {
+  const without = queue.order.filter((id) => id !== trackId);
+  without.splice(Math.max(0, queue.index + 1), 0, trackId);
+  const baseOrder = queue.baseOrder.includes(trackId) ? queue.baseOrder : [...queue.baseOrder, trackId];
+  return {...queue, order: without, baseOrder, version: 2, updatedAt: new Date().toISOString()};
+}
+
+export function enqueueLast(queue: QueueState, trackId: string): QueueState {
+  if (queue.order.includes(trackId)) return queue;
+  return {
+    ...queue,
+    order: [...queue.order, trackId],
+    baseOrder: [...queue.baseOrder, trackId],
+    version: 2,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function reorderQueue(queue: QueueState, from: number, to: number): QueueState {
+  if (from < 0 || to < 0 || from >= queue.order.length || to >= queue.order.length || from === to) return queue;
+  const order = [...queue.order];
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+  const current = currentId(queue);
+  return {...queue, order, index: current ? order.indexOf(current) : -1, updatedAt: new Date().toISOString()};
 }
 
 export function currentId(queue: QueueState): string | null {

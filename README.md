@@ -1,66 +1,78 @@
-# Prismatic
+# Prismatic 2.0
 
-Cinematic music visualizer — live spectral stage, vinyl player, and **browser-side video export**.
+Prismatic is a lightweight, listening-first music player for Windows and the web. It combines a fast everyday library and persistent queue with a cinematic audio-reactive Now Playing view and offline video export Studio.
 
-The host (including [Railway](https://railway.app)) only serves the static app and a tiny health API.  
-**All heavy work — FFT preview, canvas, and video encoding — runs on the user’s machine**, so the server stays low-RAM.
+## What changed in 2.0
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/new?referralCode=prismatic)
+- Tauri 2 replaces Electron on Windows and uses the operating system's WebView2 runtime.
+- Playback lives in one persistent player and continues while navigating, minimized, obscured, or in a background browser tab.
+- Media Session metadata and play, pause, previous, next, and seek actions integrate with supported OS/browser media controls.
+- Library-first navigation includes Songs, Albums, Artists, search, sorting, lazy covers, and virtualized song rows.
+- The editable queue, shuffle/repeat state, player preferences, and library view restore after restart.
+- Browser IndexedDB v2 hydrates metadata only and loads audio blobs and covers on demand.
 
-Or: **New Project → Deploy from GitHub** and point at this repo. Railway picks up `railway.toml` / `pnpm start` automatically.
+Prismatic preserves `%USERPROFILE%\Music\Prismatic`, its `.prismatic` state directory, playlist JSON, settings, metadata overrides, and the existing SHA-1-derived track IDs.
 
-## Features
+## Requirements
 
-- Import audio in the browser (or, in local dev, from a `music/` folder + watched folders)
-- Live audio-reactive visualizer with water ripples, spectrum pillars, and vinyl cover art
-- Export masters **offline in the browser** (WebCodecs: analyze → draw → encode, often many× faster than real-time). MediaRecorder is only a fallback.
-- Resolution presets: 720p, 1080p, 4K, square, portrait
+- Windows 10/11 x64 for the desktop app
+- Microsoft Edge WebView2 Runtime (normally already present; the installer downloads its bootstrapper only when required)
+- Current Edge or Chrome for full web functionality
+- Node.js 20.19+ and Rust stable MSVC to build from source
 
-## Quick start (local)
+The release installer is currently unsigned.
+
+## Development
 
 ```bash
 pnpm install
-pnpm dev          # http://localhost:4100
+pnpm dev                 # web/local server at http://localhost:4100
+pnpm test
+pnpm check
+pnpm tauri:dev           # Windows desktop shell
+pnpm dist:win            # release NSIS installer + verification
 ```
 
-Windows: double-click `quickrun.bat` if you use it.
+The public Railway deployment remains supported:
 
-Requirements: **Node.js 22+**. No FFmpeg required for normal use.
-
-## Deploy (Railway)
-
-1. Push this repo to GitHub.
-2. Create a Railway project from the repo (or use the deploy button).
-3. Railway runs `pnpm install` → `pnpm build` → `pnpm start`.
-4. Open the public URL. Import tracks in the browser and render there.
-
-Optional env:
-
-| Variable | Purpose |
-|----------|---------|
-| `PORT` | HTTP port (Railway sets this) |
-| `PRISMATIC_CLOUD=1` | Force cloud mode (no disk library) even in dev |
-| `PRISMATIC_LOCAL=1` | Force local library APIs even in production (not recommended on Railway) |
+```bash
+pnpm build
+pnpm build:server
+pnpm start
+```
 
 ## Architecture
 
 | Layer | Responsibility |
-|-------|----------------|
-| **Browser** | Audio decode, live visualizer, MediaRecorder export, downloads |
-| **Server (cloud)** | Static SPA + `/api/health` |
-| **Server (local dev)** | Vite + optional `music/` library / watch folders — still no server encode |
+|---|---|
+| React/Vite | Library, playlists, persistent player/queue, Now Playing, and Studio |
+| `PlatformBackend` | Stable typed boundary selecting browser HTTP/IndexedDB or Tauri commands |
+| Tauri/Rust | Desktop library scan, metadata/covers, imports, watched folders, playlists, preferences, scoped media paths, and output locations |
+| TypeScript server | Railway/web deployment and optional local-server library APIs |
+| IndexedDB v2 | Separate metadata, audio blob, cover, and state records with lazy hydration |
 
-Server-side `@napi-rs/canvas` + FFmpeg export is **optional** (`optionalDependencies` + scripts) and is not used by the web app.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime and persistence details and [RELEASE_NOTES.md](RELEASE_NOTES.md) for migration notes.
 
-## Commands
+## Performance
 
-```bash
-pnpm dev       # local studio
-pnpm build     # production client → dist/
-pnpm start     # serve dist/ (production / Railway)
-pnpm check     # typecheck + build
-```
+Measured on the same Windows development machine:
+
+| Metric | 1.2.0 Electron baseline | 2.0.0 Tauri build |
+|---|---:|---:|
+| Installer | 87.9 MiB | 2.54 MiB |
+| Packaged executable | Electron runtime included | 6.14 MiB |
+| Hidden idle private working set | ~265.5 MiB private baseline | ~194.3 MiB across app + WebView2 |
+| Hidden background CPU | not previously gated | ~0.1% over 30 seconds |
+
+The final installer is ~2.54 MiB and the installed Prismatic files are ~6.2 MiB. Windows' ordinary working-set counters double-count shared WebView2 code pages across its sandboxed processes (about 476 MiB summed in this measurement), so the private working set is the comparable application-memory figure. The shared OS WebView2 runtime is excluded from Prismatic's installed size. Visualization animation and playback-time rendering stop when hidden; audio output does not.
+
+## Data safety
+
+- Removing a track from the library does not delete it unless disk deletion is explicitly chosen.
+- Uninstalling Prismatic does not remove the user's music library or `.prismatic` state.
+- Desktop asset access is scoped to the built-in music library, cached covers, and explicitly watched folders.
+- Listening playback uses the browser/OS decoder without normalization or transcoding.
 
 ## License
 
-Private / your project — adjust as needed.
+Private project.
