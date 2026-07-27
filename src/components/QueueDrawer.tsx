@@ -30,7 +30,16 @@ export function QueueDrawer({open, queue, tracksById, onClose, onPlay, onRemove,
             <article className={`queue-item ${index === queue.index ? "current" : ""}`} key={id}>
               <button type="button" className="queue-play" onClick={() => onPlay(id)}>
                 {index === queue.index ? <Play size={12} fill="currentColor" /> : <span>{index + 1}</span>}
-                <img src={track.coverUrl} alt="" loading="lazy" />
+                <img
+                  className={track.coverUrl.includes("music-note.") ? "fallback-note" : ""}
+                  src={track.coverUrl}
+                  alt=""
+                  loading="lazy"
+                  onError={(event) => {
+                    event.currentTarget.src = "/music-note.svg";
+                    event.currentTarget.classList.add("fallback-note");
+                  }}
+                />
                 <span><strong>{track.title}</strong><small>{track.artist}</small></span>
               </button>
               <div className="queue-item-actions">

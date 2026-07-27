@@ -123,6 +123,17 @@ struct LibraryMeta {
     offline_only: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryClearResult {
+    tracks: Vec<DesktopTrack>,
+    playlists: Vec<Playlist>,
+    watch_folders: Vec<WatchFolder>,
+    deleted_managed_files: usize,
+    preserved_external_files: usize,
+    failed_managed_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Playlist {
@@ -167,6 +178,12 @@ impl Default for PlayerPrefs {
 
 fn display_err(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+fn ensure_managed_path<'a>(managed_root: &Path, target: &'a Path) -> Result<&'a Path, String> {
+    target
+        .strip_prefix(managed_root)
+        .map_err(|_| "Refusing to delete a file outside Prismatic's managed library".to_string())
 }
 
 fn sha1_hex(input: &str) -> String {
@@ -486,8 +503,13 @@ fn remove_track(
     delete_file: bool,
 ) -> Result<Vec<DesktopTrack>, String> {
     let track = find_track(&paths, &id)?;
-    if delete_file {
-        fs::remove_file(&track.media_path).map_err(display_err)?;
+    if delete_file && track.source_id == "music" {
+        let managed_root = paths.music_directory.canonicalize().map_err(display_err)?;
+        let target = PathBuf::from(&track.media_path)
+            .canonicalize()
+            .map_err(display_err)?;
+        ensure_managed_path(&managed_root, &target)?;
+        fs::remove_file(&target).map_err(display_err)?;
     }
     let mut config = settings(&paths);
     if !config.hidden.contains(&id) {
@@ -496,6 +518,63 @@ fn remove_track(
     }
     GENERATION.fetch_add(1, Ordering::Relaxed);
     scan_tracks(&paths)
+}
+
+#[tauri::command]
+fn clear_library(
+    paths: State<LibraryPaths>,
+    watcher: State<WatcherState>,
+) -> Result<LibraryClearResult, String> {
+    let tracks = scan_tracks(&paths)?;
+    let managed_root = paths.music_directory.canonicalize().map_err(display_err)?;
+    let mut deleted_managed_files = 0usize;
+    let mut preserved_external_files = 0usize;
+    let mut failed_managed_files = Vec::new();
+
+    for track in tracks {
+        if track.source_id != "music" {
+            preserved_external_files += 1;
+            continue;
+        }
+        let result = PathBuf::from(&track.media_path)
+            .canonicalize()
+            .map_err(display_err)
+            .and_then(|target| {
+                ensure_managed_path(&managed_root, &target)?;
+                fs::remove_file(&target).map_err(display_err)
+            });
+        match result {
+            Ok(()) => deleted_managed_files += 1,
+            Err(error) => failed_managed_files.push(format!("{}: {error}", track.file_name)),
+        }
+    }
+
+    let previous = settings(&paths);
+    {
+        let mut active_watcher = watcher.0.lock().map_err(display_err)?;
+        for folder in previous.watch_folders {
+            let _ = active_watcher.unwatch(Path::new(&folder.path));
+        }
+    }
+    let config = Settings::default();
+    write_json(&paths.state_directory.join("settings.json"), &config)?;
+    write_json::<HashMap<String, Override>>(
+        &paths.state_directory.join("library.json"),
+        &HashMap::new(),
+    )?;
+    write_json::<Vec<Playlist>>(&playlists_path(&paths), &Vec::new())?;
+    let _ = fs::remove_dir_all(paths.state_directory.join("covers"));
+    let _ = fs::remove_dir_all(paths.state_directory.join("waveforms"));
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+
+    Ok(LibraryClearResult {
+        tracks: scan_tracks(&paths)?,
+        playlists: Vec::new(),
+        watch_folders: Vec::new(),
+        deleted_managed_files,
+        preserved_external_files,
+        failed_managed_files,
+    })
 }
 
 fn copy_to_library(paths: &LibraryPaths, source: &Path) -> Result<Option<String>, String> {
@@ -835,6 +914,7 @@ pub fn run() {
             library_meta,
             update_track,
             remove_track,
+            clear_library,
             import_paths,
             import_folder,
             add_watch_folder,
@@ -850,6 +930,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Prismatic");
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::ensure_managed_path;
+    use std::path::Path;
+
+    #[test]
+    fn managed_path_guard_accepts_children() {
+        let root = Path::new("C:\\Users\\Example\\Music\\Prismatic");
+        let track = Path::new("C:\\Users\\Example\\Music\\Prismatic\\song.mp3");
+        assert!(ensure_managed_path(root, track).is_ok());
+    }
+
+    #[test]
+    fn managed_path_guard_rejects_external_sources() {
+        let root = Path::new("C:\\Users\\Example\\Music\\Prismatic");
+        let track = Path::new("D:\\Imported Music\\song.mp3");
+        assert!(ensure_managed_path(root, track).is_err());
+    }
 }
 
 #[cfg(test)]

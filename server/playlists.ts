@@ -88,6 +88,11 @@ export class PlaylistRepository {
     return next;
   }
 
+  async clear() {
+    await this.write([]);
+    return [];
+  }
+
   async stripTrack(trackId: string) {
     const list = await this.read();
     let changed = false;

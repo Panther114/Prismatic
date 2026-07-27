@@ -30,6 +30,15 @@ export type LibraryMeta = {
 
 export type PlayerPrefsDto = PlayerPrefs;
 
+export type LibraryClearResult = {
+  tracks: Track[];
+  playlists: Playlist[];
+  watchFolders: WatchFolder[];
+  deletedManagedFiles: number;
+  preservedExternalFiles: number;
+  failedManagedFiles: string[];
+};
+
 export interface PlatformBackend {
   readonly kind: "web" | "tauri";
   health(): Promise<HealthInfo>;
@@ -37,6 +46,7 @@ export interface PlatformBackend {
   libraryMeta(): Promise<LibraryMeta>;
   updateTrack(id: string, update: {title: string; artist: string}): Promise<Track>;
   removeTrack(id: string, options?: {deleteFile?: boolean}): Promise<Track[]>;
+  clearLibrary(): Promise<LibraryClearResult>;
   importAudio(files?: FileList | File[]): Promise<{tracks: Track[]; imported: string[]; skipped: number} | Track[]>;
   importFolder(folderPath: string, maxDepth?: number): Promise<{tracks: Track[]; imported: string[]; skipped: number; musicDirectory: string}>;
   watchFolders(): Promise<WatchFolder[]>;
@@ -89,6 +99,7 @@ class WebBackend implements PlatformBackend {
   });
   removeTrack = (id: string, options: {deleteFile?: boolean} = {}) =>
     json<Track[]>(`/api/tracks/${encodeURIComponent(id)}?deleteFile=${options.deleteFile ? "1" : "0"}`, {method: "DELETE"});
+  clearLibrary = () => json<LibraryClearResult>("/api/library", {method: "DELETE"});
   importAudio = (files: FileList | File[] = []) => {
     const form = new FormData();
     Array.from(files).forEach((file) => form.append("audio", file));
@@ -153,7 +164,7 @@ function mapDesktopTrack(track: DesktopTrack): Track {
   return {
     ...track,
     mediaUrl: convertFileSrc(track.mediaPath),
-    coverUrl: track.coverPath ? convertFileSrc(track.coverPath) : "/music-note.png",
+    coverUrl: track.coverPath ? convertFileSrc(track.coverPath) : "/music-note.svg",
   };
 }
 
@@ -169,6 +180,10 @@ class TauriBackend implements PlatformBackend {
   }
   async removeTrack(id: string, options: {deleteFile?: boolean} = {}) {
     return (await invoke<DesktopTrack[]>("remove_track", {id, deleteFile: Boolean(options.deleteFile)})).map(mapDesktopTrack);
+  }
+  async clearLibrary() {
+    const result = await invoke<Omit<LibraryClearResult, "tracks"> & {tracks: DesktopTrack[]}>("clear_library");
+    return {...result, tracks: result.tracks.map(mapDesktopTrack)};
   }
   async importAudio() {
     const selection = await open({multiple: true, directory: false, filters: audioFilters});

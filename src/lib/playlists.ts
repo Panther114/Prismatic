@@ -138,6 +138,12 @@ export class PlaylistStore {
     return this.list();
   }
 
+  clearLocal() {
+    this.cache = [];
+    writeLocal([]);
+    return [];
+  }
+
   async stripTrack(trackId: string) {
     const previous = this.cache;
     const next = previous.map((p) => {

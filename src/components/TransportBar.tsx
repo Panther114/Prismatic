@@ -2,6 +2,7 @@ import {
   Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Volume2, VolumeX,
 } from "lucide-react";
 import {WaveformSeek} from "./WaveformSeek";
+import {RangeSlider} from "./RangeSlider";
 import type {RepeatMode} from "../types";
 
 const formatTime = (seconds: number) => {
@@ -92,15 +93,7 @@ export function TransportBar({
         <button type="button" onClick={onToggleMute} aria-label={muted || volume === 0 ? "Unmute" : "Mute"}>
           {muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
         </button>
-        <input
-          aria-label="Volume"
-          type="range"
-          min="0"
-          max="1"
-          step=".01"
-          value={displayVolume}
-          onChange={(event) => onVolume(Number(event.target.value))}
-        />
+        <RangeSlider ariaLabel="Volume" value={displayVolume} onChange={onVolume} />
       </div>
     </div>
   );

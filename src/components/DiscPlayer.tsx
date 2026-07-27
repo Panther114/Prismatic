@@ -18,7 +18,7 @@ export function DiscPlayer({track, playing, currentTime, progress}: Props) {
         <div className="vinyl-grooves" />
         <div className="cover-label">
           {!coverFailed && <img src={track.coverUrl} alt={`${track.title} cover`} onError={() => setCoverFailed(true)} />}
-          {coverFailed && <img className="fallback-note" src="/music-note.png" alt="Generic music artwork" />}
+          {coverFailed && <img className="fallback-note" src="/music-note.svg" alt="Generic music artwork" />}
         </div>
         <i className="spindle" />
       </div>

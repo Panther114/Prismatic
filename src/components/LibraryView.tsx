@@ -1,10 +1,11 @@
 import {useDeferredValue, useMemo, useRef, useState, type ComponentType, type UIEvent} from "react";
 import {
-  Album, ArrowLeft, Clock3, Ellipsis, ListPlus, Music2, Play, Plus, Search, Trash2, UserRound, X,
+  Album, ArrowLeft, Clock3, ListPlus, LoaderCircle, Music2, Plus, Search, Trash2, UserRound, X,
 } from "lucide-react";
 import type {LibraryMode, LibrarySort, Playlist, Track} from "../types";
+import {CustomSelect} from "./CustomSelect";
 
-const ROW_HEIGHT = 64;
+const ROW_HEIGHT = 40;
 const OVERSCAN = 7;
 
 type Props = {
@@ -12,6 +13,7 @@ type Props = {
   playlists: Playlist[];
   selectedId: string;
   loading: boolean;
+  removingId: string;
   query: string;
   mode: LibraryMode;
   sort: LibrarySort;
@@ -19,12 +21,10 @@ type Props = {
   onQuery: (value: string) => void;
   onMode: (mode: LibraryMode) => void;
   onSort: (sort: LibrarySort) => void;
-  onSelect: (id: string) => void;
   onPlay: (id: string) => void;
-  onPlayNext: (id: string) => void;
-  onAddQueue: (id: string) => void;
   onAddPlaylist: (playlistId: string, trackId: string) => void;
   onRemove: (id: string, title: string) => void;
+  onClear: () => void;
   onImportFiles: () => void;
   onImportFolder: () => void;
 };
@@ -45,13 +45,11 @@ function VirtualTrackList({
   selectedId,
   playlists,
   TrackCover,
-  onSelect,
   onPlay,
-  onPlayNext,
-  onAddQueue,
   onAddPlaylist,
   onRemove,
-}: Pick<Props, "tracks" | "selectedId" | "playlists" | "TrackCover" | "onSelect" | "onPlay" | "onPlayNext" | "onAddQueue" | "onAddPlaylist" | "onRemove">) {
+  removingId,
+}: Pick<Props, "tracks" | "selectedId" | "playlists" | "TrackCover" | "onPlay" | "onAddPlaylist" | "onRemove" | "removingId">) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(640);
@@ -74,8 +72,10 @@ function VirtualTrackList({
           <button
             type="button"
             className="song-main"
-            onClick={() => onSelect(track.id)}
-            onDoubleClick={() => onPlay(track.id)}
+            onClick={(event) => {
+              onPlay(track.id);
+              if (event.detail > 0) event.currentTarget.blur();
+            }}
             aria-label={`${track.title} by ${track.artist}`}
           >
             <TrackCover track={track} />
@@ -86,22 +86,37 @@ function VirtualTrackList({
             <span className="song-album">{track.album || "Unknown album"}</span>
             <time>{formatTime(track.duration)}</time>
           </button>
-          <details className="song-menu">
-            <summary aria-label={`Actions for ${track.title}`}><Ellipsis size={17} /></summary>
-            <div className="song-menu-popover">
-              <button type="button" onClick={() => onPlay(track.id)}><Play size={14} />Play</button>
-              <button type="button" onClick={() => onPlayNext(track.id)}><ListPlus size={14} />Play next</button>
-              <button type="button" onClick={() => onAddQueue(track.id)}><Plus size={14} />Add to queue</button>
+          <div className="song-row-actions">
+            <details className="song-playlist-menu">
+              <summary title="Add to playlist" aria-label={`Add ${track.title} to a playlist`}><ListPlus size={14} /></summary>
+              <div className="song-menu-popover">
+                {!playlists.length ? <span className="song-menu-empty">No playlists yet</span> : null}
               {playlists.map((playlist) => (
-                <button type="button" key={playlist.id} onClick={() => onAddPlaylist(playlist.id, track.id)}>
-                  <Music2 size={14} />Add to {playlist.name}
+                <button
+                  type="button"
+                  key={playlist.id}
+                  disabled={playlist.trackIds.includes(track.id)}
+                  onClick={(event) => {
+                    onAddPlaylist(playlist.id, track.id);
+                    event.currentTarget.closest("details")?.removeAttribute("open");
+                  }}
+                >
+                  <Music2 size={13} />{playlist.trackIds.includes(track.id) ? `In ${playlist.name}` : playlist.name}
                 </button>
               ))}
-              <button type="button" className="danger" onClick={() => onRemove(track.id, track.title)}>
-                <Trash2 size={14} />Remove from library
-              </button>
-            </div>
-          </details>
+              </div>
+            </details>
+            <button
+              type="button"
+              className="song-remove"
+              title="Remove from library"
+              aria-label={`Remove ${track.title} from library`}
+              disabled={removingId === track.id}
+              onClick={() => onRemove(track.id, track.title)}
+            >
+              {removingId === track.id ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+            </button>
+          </div>
         </article>
       ))}
       <div style={{height: Math.max(0, tracks.length - end) * ROW_HEIGHT}} aria-hidden="true" />
@@ -145,41 +160,43 @@ export function LibraryView(props: Props) {
   return (
     <section className="library-v2" aria-labelledby="library-title">
       <header className="library-toolbar">
-        <div>
+        <div className="library-title-compact">
           <span className="eyebrow">Your music</span>
           <h1 id="library-title">{collection?.name || "Library"}</h1>
-          <p>{filtered.length} {filtered.length === 1 ? "track" : "tracks"} ready to play</p>
+          <p>{filtered.length} {filtered.length === 1 ? "track" : "tracks"}</p>
         </div>
-        <div className="library-actions">
-          <button type="button" className="primary-button" onClick={props.onImportFiles}><Plus size={16} />Add music</button>
-          <button type="button" className="quiet-button" onClick={props.onImportFolder}>Add folder</button>
-        </div>
-      </header>
-
-      {collection ? (
-        <button type="button" className="back-link" onClick={() => setCollection(null)}><ArrowLeft size={15} />All {collection.kind}s</button>
-      ) : (
-        <div className="library-controls">
+        {!collection ? (
+          <>
           <div className="segmented-control" aria-label="Library view">
             <button type="button" className={props.mode === "songs" ? "active" : ""} onClick={() => props.onMode("songs")}>Songs</button>
             <button type="button" className={props.mode === "albums" ? "active" : ""} onClick={() => props.onMode("albums")}>Albums</button>
             <button type="button" className={props.mode === "artists" ? "active" : ""} onClick={() => props.onMode("artists")}>Artists</button>
           </div>
           <label className="library-search-v2">
-            <Search size={16} aria-hidden="true" />
+            <Search size={14} aria-hidden="true" />
             <input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="Search your library" aria-label="Search library" />
             {props.query ? <button type="button" onClick={() => props.onQuery("")} aria-label="Clear search"><X size={14} /></button> : null}
           </label>
-          <label className="sort-control">Sort
-            <select value={props.sort} onChange={(event) => props.onSort(event.target.value as LibrarySort)}>
-              <option value="title">Title</option>
-              <option value="artist">Artist</option>
-              <option value="album">Album</option>
-              <option value="duration">Duration</option>
-            </select>
-          </label>
+          <CustomSelect
+            className="library-sort-select"
+            ariaLabel="Sort library"
+            value={props.sort}
+            onChange={(value) => props.onSort(value as LibrarySort)}
+            options={[
+              {value: "title", label: "Title"},
+              {value: "artist", label: "Artist"},
+              {value: "album", label: "Album"},
+              {value: "duration", label: "Duration"},
+            ]}
+          />
+          </>
+        ) : <button type="button" className="back-link" onClick={() => setCollection(null)}><ArrowLeft size={15} />All {collection.kind}s</button>}
+        <div className="library-actions">
+          <button type="button" className="primary-button" onClick={props.onImportFiles}><Plus size={14} />Add music</button>
+          <button type="button" className="quiet-button" onClick={props.onImportFolder}>Folder</button>
+          <button type="button" className="quiet-button danger" disabled={!props.tracks.length} onClick={props.onClear} title="Clear library"><Trash2 size={14} /><span>Clear</span></button>
         </div>
-      )}
+      </header>
 
       {props.loading ? (
         <div className="library-skeleton" aria-label="Loading library">
@@ -197,7 +214,7 @@ export function LibraryView(props: Props) {
       ) : (
         <div className="collection-grid custom-scroll">
           {groups.map(([name, tracks]) => {
-            const cover = tracks.find((track) => !track.coverUrl.endsWith("music-note.png")) || tracks[0];
+            const cover = tracks.find((track) => !track.coverUrl.includes("music-note.")) || tracks[0];
             const duration = tracks.reduce((total, track) => total + track.duration, 0);
             return (
               <button
@@ -207,7 +224,7 @@ export function LibraryView(props: Props) {
                 onClick={() => setCollection({kind: props.mode === "albums" ? "album" : "artist", name})}
               >
                 <span className="collection-art">
-                  {cover ? <img src={cover.coverUrl} alt="" loading="lazy" /> : props.mode === "albums" ? <Album /> : <UserRound />}
+                  {cover ? <img className={cover.coverUrl.includes("music-note.") ? "fallback-note" : ""} src={cover.coverUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/music-note.svg"; event.currentTarget.classList.add("fallback-note"); }} /> : props.mode === "albums" ? <Album /> : <UserRound />}
                 </span>
                 <strong>{name}</strong>
                 <small>{tracks.length} tracks <Clock3 size={11} /> {formatTime(duration)}</small>

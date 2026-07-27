@@ -304,6 +304,21 @@ if (localFeatures) {
     }
   });
 
+  app.delete("/api/library", async (_request, response, next) => {
+    try {
+      const summary = await library.clear();
+      await playlists.clear();
+      response.json({
+        tracks: await library.list(),
+        playlists: [],
+        watchFolders: await library.getWatchFolders(),
+        ...summary,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/playlists", async (_request, response, next) => {
     try {
       response.json(await playlists.list());
@@ -452,6 +467,14 @@ if (localFeatures) {
   app.get("/api/jobs", (_request, response) => response.json([]));
   app.get("/api/renders", (_request, response) => response.json([]));
   app.get("/api/playlists", (_request, response) => response.json([]));
+  app.delete("/api/library", (_request, response) => response.json({
+    tracks: [],
+    playlists: [],
+    watchFolders: [],
+    deletedManagedFiles: 0,
+    preservedExternalFiles: 0,
+    failedManagedFiles: [],
+  }));
   app.post("/api/playlists", (_request, response) => {
     response.status(400).json({error: "Cloud mode stores playlists in the browser."});
   });

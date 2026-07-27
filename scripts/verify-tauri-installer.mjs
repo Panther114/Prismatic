@@ -2,13 +2,14 @@ import {createHash} from "node:crypto";
 import {promises as fs} from "node:fs";
 import path from "node:path";
 
+const pkg = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8"));
 const installer = path.resolve(
   "src-tauri",
   "target",
   "release",
   "bundle",
   "nsis",
-  "Prismatic_2.0.0_x64-setup.exe",
+  `Prismatic_${pkg.version}_x64-setup.exe`,
 );
 const bytes = await fs.readFile(installer);
 const sizeMiB = bytes.byteLength / 1024 / 1024;

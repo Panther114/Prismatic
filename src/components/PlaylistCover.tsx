@@ -24,8 +24,8 @@ export function PlaylistCover({trackIds, tracksById, size = 40, className = ""}:
     return (
       <span className={`playlist-cover ${className}`} style={{width: size, height: size}} aria-hidden="true">
         {src
-          ? <img src={src} alt="" />
-          : <img className="fallback-note" src="/music-note.png" alt="" />}
+          ? <img className={src.includes("music-note.") ? "fallback-note" : ""} src={src} alt="" onError={(event) => { event.currentTarget.src = "/music-note.svg"; event.currentTarget.classList.add("fallback-note"); }} />
+          : <img className="fallback-note" src="/music-note.svg" alt="" />}
       </span>
     );
   }
@@ -38,7 +38,7 @@ export function PlaylistCover({trackIds, tracksById, size = 40, className = ""}:
     >
       {tiles.map((src, i) => (
         <span key={i} className={`playlist-cover-cell ${src ? "" : "empty"}`}>
-          {src ? <img src={src} alt="" /> : null}
+          {src ? <img className={src.includes("music-note.") ? "fallback-note" : ""} src={src} alt="" onError={(event) => { event.currentTarget.src = "/music-note.svg"; event.currentTarget.classList.add("fallback-note"); }} /> : null}
         </span>
       ))}
     </span>

@@ -164,6 +164,19 @@ export async function idbDeleteTrack(id: string) {
   }
 }
 
+export async function idbClearTracks() {
+  const db = await openDb();
+  try {
+    const stores = [META_STORE, AUDIO_STORE, COVER_STORE];
+    if (db.objectStoreNames.contains(LEGACY_STORE)) stores.push(LEGACY_STORE);
+    const transaction = db.transaction(stores, "readwrite");
+    for (const store of stores) transaction.objectStore(store).clear();
+    await transactionDone(transaction);
+  } finally {
+    db.close();
+  }
+}
+
 export async function idbListTrackMetadata(): Promise<StoredTrackMeta[]> {
   const db = await openDb();
   try {

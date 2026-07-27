@@ -40,6 +40,12 @@ type CacheEntry = {
   absolutePath: string;
 };
 
+export type LibraryClearResult = {
+  deletedManagedFiles: number;
+  preservedExternalFiles: number;
+  failedManagedFiles: string[];
+};
+
 const idFor = (sourceId: string, relativePath: string) =>
   createHash("sha1")
     .update(`${sourceId}:${relativePath.replaceAll("\\", "/").toLowerCase()}`)
@@ -497,15 +503,17 @@ export class MusicLibrary {
     if (!track) return false;
     const deleteFile = options.deleteFile === true;
 
-    if (deleteFile) {
-      try {
-        await fs.unlink(this.absolutePath(track));
-      } catch (error) {
-        console.warn(`Could not delete ${track.relativePath}:`, error);
+    if (deleteFile && track.sourceId === "music") {
+      const target = await fs.realpath(this.absolutePath(track));
+      const managedRoot = await fs.realpath(this.musicDirectory);
+      const relative = path.relative(managedRoot, target);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error("Refusing to delete a file outside Prismatic's managed library");
       }
+      await fs.unlink(target);
     }
 
-    // Always hide so playlist removal works and disk-delete failure still drops it from the UI.
+    // Watched-folder tracks are hidden without touching their external source file.
     if (!this.settings.hidden.includes(id)) {
       this.settings.hidden.push(id);
       await this.writeSettings();
@@ -523,6 +531,47 @@ export class MusicLibrary {
     this.markDirty();
     await this.list();
     return true;
+  }
+
+  async clear(): Promise<LibraryClearResult> {
+    await this.ensureSettings();
+    const tracks = await this.list();
+    const failedManagedFiles: string[] = [];
+    let deletedManagedFiles = 0;
+    let preservedExternalFiles = 0;
+    const managedRoot = await fs.realpath(this.musicDirectory);
+
+    for (const track of tracks) {
+      if (track.sourceId !== "music") {
+        preservedExternalFiles += 1;
+        continue;
+      }
+      try {
+        const target = await fs.realpath(this.absolutePath(track));
+        const relative = path.relative(managedRoot, target);
+        if (relative.startsWith("..") || path.isAbsolute(relative)) {
+          throw new Error("resolved outside the managed library");
+        }
+        await fs.unlink(target);
+        deletedManagedFiles += 1;
+      } catch (error) {
+        failedManagedFiles.push(`${track.fileName}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    this.settings = {watchFolders: [], hidden: []};
+    await this.writeSettings();
+    await Promise.all([
+      fs.writeFile(this.overridesPath, "{}\n", "utf8"),
+      fs.rm(path.join(this.stateDirectory, "covers"), {recursive: true, force: true}),
+      fs.rm(path.join(this.stateDirectory, "waveforms"), {recursive: true, force: true}),
+    ]);
+    this.cache.clear();
+    this.cachedList = [];
+    this.resyncWatchers();
+    this.markDirty();
+    await this.list();
+    return {deletedManagedFiles, preservedExternalFiles, failedManagedFiles};
   }
 
   /** After multer import, unhide matching music-root basenames and rescan. */

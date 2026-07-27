@@ -1,6 +1,7 @@
 import type {Track} from "../types";
 import {
   idbDeleteTrack,
+  idbClearTracks,
   idbGetTrackAudio,
   idbGetTrackCover,
   idbListTrackMetadata,
@@ -48,7 +49,7 @@ async function tryCoverBlob(file: File): Promise<{url: string; buffer?: ArrayBuf
     const {parseBlob} = await import("music-metadata");
     const meta = await parseBlob(file);
     const pic = meta.common.picture?.[0];
-    if (!pic?.data) return {url: "/music-note.png"};
+    if (!pic?.data) return {url: "/music-note.svg"};
     const bytes = pic.data instanceof Uint8Array ? pic.data : new Uint8Array(pic.data as ArrayBuffer);
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
@@ -56,7 +57,7 @@ async function tryCoverBlob(file: File): Promise<{url: string; buffer?: ArrayBuf
     const blob = new Blob([copy], {type});
     return {url: URL.createObjectURL(blob), buffer: copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength), type};
   } catch {
-    return {url: "/music-note.png"};
+    return {url: "/music-note.svg"};
   }
 }
 
@@ -100,7 +101,7 @@ export class ClientLibrary {
           relativePath: row.fileName,
           folder: "Browser",
           mediaUrl: `client-audio:${row.id}`,
-          coverUrl: "/music-note.png",
+          coverUrl: "/music-note.svg",
           waveformUrl: `client-waveform:${row.id}`,
           title: row.title,
           artist: row.artist,
@@ -131,7 +132,7 @@ export class ClientLibrary {
     const file = new File([audioBlob], audio.fileName, {type: audio.audioType || "audio/mpeg"});
     const mediaUrl = URL.createObjectURL(audioBlob);
     const objectUrls = [mediaUrl];
-    let coverUrl = "/music-note.png";
+    let coverUrl = "/music-note.svg";
     if (cover?.cover?.byteLength) {
       const coverBlob = new Blob([cover.cover], {type: cover.coverType || "image/jpeg"});
       coverUrl = URL.createObjectURL(coverBlob);
@@ -260,6 +261,16 @@ export class ClientLibrary {
     }
     this.tracks = this.tracks.filter((track) => track.id !== id);
     void idbDeleteTrack(id).catch(() => undefined);
+    return this.list();
+  }
+
+  async clear() {
+    for (const extras of this.extras.values()) {
+      for (const url of extras.objectUrls) URL.revokeObjectURL(url);
+    }
+    this.extras.clear();
+    this.tracks = [];
+    await idbClearTracks();
     return this.list();
   }
 }

@@ -4,7 +4,7 @@ import type {Track} from "../types";
 export function isRealCover(url: string | undefined | null): boolean {
   if (!url) return false;
   if (url.includes("music-note")) return false;
-  if (url === "/music-note.png") return false;
+  if (url.includes("music-note.")) return false;
   return true;
 }
 

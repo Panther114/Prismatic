@@ -1,4 +1,4 @@
-# Prismatic 2.0 architecture
+# Prismatic 2.1 architecture
 
 ## Runtime boundary
 

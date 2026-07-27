@@ -1,4 +1,4 @@
-# Prismatic 2.0
+# Prismatic 2.1
 
 Prismatic is a lightweight, listening-first music player for Windows and the web. It combines a fast everyday library and persistent queue with a cinematic audio-reactive Now Playing view and offline video export Studio.
 
@@ -57,7 +57,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for runtime and persistence details and [
 
 Measured on the same Windows development machine:
 
-| Metric | 1.2.0 Electron baseline | 2.0.0 Tauri build |
+| Metric | 1.2.0 Electron baseline | 2.1.0 Tauri build |
 |---|---:|---:|
 | Installer | 87.9 MiB | 2.54 MiB |
 | Packaged executable | Electron runtime included | 6.14 MiB |

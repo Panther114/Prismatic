@@ -11,6 +11,7 @@ import {PlaylistCover} from "./components/PlaylistCover";
 import {LibraryView} from "./components/LibraryView";
 import {PersistentPlayer} from "./components/PersistentPlayer";
 import {QueueDrawer} from "./components/QueueDrawer";
+import {CustomSelect} from "./components/CustomSelect";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -20,8 +21,6 @@ import {
   createQueue,
   currentId,
   cycleRepeat,
-  enqueueLast,
-  enqueueNext,
   loadQueue,
   jumpTo,
   onTrackEnded,
@@ -40,20 +39,14 @@ import {setCompactPlayer} from "./lib/compactPlayer";
 
 const ACTIVE_STATUSES = new Set(["queued", "analyzing", "rendering"]);
 
-const formatTime = (seconds: number) => {
-  if (!Number.isFinite(seconds)) return "00:00";
-  const rounded = Math.max(0, Math.floor(seconds));
-  return `${String(Math.floor(rounded / 60)).padStart(2, "0")}:${String(rounded % 60).padStart(2, "0")}`;
-};
-
 function TrackCover({track}: {track: Track}) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [track.id]);
   return (
     <span className="track-cover" aria-hidden="true">
       {!failed
-        ? <img src={track.coverUrl} alt="" onError={() => setFailed(true)} />
-        : <img className="fallback-note" src="/music-note.png" alt="" />}
+        ? <img className={track.coverUrl.includes("music-note.") ? "fallback-note" : ""} src={track.coverUrl} alt="" onError={() => setFailed(true)} />
+        : <img className="fallback-note" src="/music-note.svg" alt="" />}
     </span>
   );
 }
@@ -84,6 +77,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [cloudMode, setCloudMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [playlistCreateRequest, setPlaylistCreateRequest] = useState(0);
   const [title, setTitle] = useState("");
   const [artist, setArtist] = useState("");
   const [resolution, setResolution] = useState<ResolutionPreset>("1080p");
@@ -101,13 +96,11 @@ export default function App() {
   const [musicDirectory, setMusicDirectory] = useState("");
   const [exportSize, setExportSize] = useState<{width: number; height: number} | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<null | {
-    mode: "simple" | "track-remove" | "track-remove-disk";
+    mode: "simple";
     title: string;
     body: string;
     confirmLabel?: string;
     danger?: boolean;
-    trackId?: string;
-    trackTitle?: string;
     onConfirm?: () => void | Promise<void>;
   }>(null);
   // Seed from localStorage only; disk prefs load once local mode is known.
@@ -149,17 +142,6 @@ export default function App() {
   const dirty = Boolean(selected && (title !== selected.title || artist !== selected.artist));
   const progress = selected?.duration ? Math.min(1, currentTime / selected.duration) : 0;
   const tracksById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
-  const filteredTracks = useMemo(() => {
-    const q = libraryQuery.trim().toLowerCase();
-    if (!q) return tracks;
-    return tracks.filter((t) =>
-      t.title.toLowerCase().includes(q)
-      || t.artist.toLowerCase().includes(q)
-      || t.album.toLowerCase().includes(q)
-      || t.fileName.toLowerCase().includes(q),
-    );
-  }, [tracks, libraryQuery]);
-
   /**
    * Offline local/desktop: disk library is the only source of truth.
    * Cloud (Railway): merge browser IndexedDB imports.
@@ -553,7 +535,7 @@ export default function App() {
       title: selected.title,
       artist: selected.artist,
       album: selected.album,
-      artwork: selected.coverUrl && !selected.coverUrl.endsWith("music-note.png")
+      artwork: selected.coverUrl && !selected.coverUrl.includes("music-note.")
         ? [{src: selected.coverUrl}]
         : undefined,
     });
@@ -616,7 +598,8 @@ export default function App() {
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName || "";
       if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
-      if (event.code === "Space" && !event.repeat && tag !== "BUTTON") {
+      if (document.querySelector('[role="dialog"]')) return;
+      if (event.code === "Space" && !event.repeat) {
         event.preventDefault();
         void togglePlaybackRef.current();
         return;
@@ -1019,13 +1002,53 @@ export default function App() {
     }
   };
 
-  const removeTrack = (trackId: string, trackTitle: string) => {
+  const removeTrack = (trackId: string, _trackTitle: string) => {
+    void executeRemoveTrack(trackId, true);
+  };
+
+  const executeClearLibrary = async () => {
+    setError("");
+    audioRef.current?.pause();
+    setPlaying(false);
+    try {
+      const result = cloudModeRef.current
+        ? {
+          tracks: [] as Track[],
+          playlists: [],
+          watchFolders: [],
+          deletedManagedFiles: 0,
+          preservedExternalFiles: 0,
+          failedManagedFiles: [] as string[],
+        }
+        : await api.clearLibrary();
+      await clientLibrary.clear();
+      playlistStore.clearLocal();
+      setTracks(result.tracks);
+      setPlaylists([]);
+      setWatchFolders([]);
+      setSelectedId("");
+      setQueue(createQueue([], {
+        shuffle: queueRef.current.shuffle,
+        repeat: queueRef.current.repeat,
+        sourceLabel: "Library",
+      }));
+      setQueueOpen(false);
+      if (result.failedManagedFiles.length) {
+        setError(`Library cleared, but ${result.failedManagedFiles.length} managed file(s) could not be deleted.`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const clearLibrary = () => {
     setConfirmDialog({
-      mode: "track-remove",
-      title: "Remove track",
-      body: `What should happen to “${trackTitle}”?`,
-      trackId,
-      trackTitle,
+      mode: "simple",
+      title: "Clear library",
+      body: "Delete every Prismatic-managed music copy, playlist, and watched-folder setting? Original imported and watched files outside Prismatic will not be touched.",
+      confirmLabel: "Clear library",
+      danger: true,
+      onConfirm: executeClearLibrary,
     });
   };
 
@@ -1125,7 +1148,7 @@ export default function App() {
 
   const playTrack = (trackId: string) => {
     if (trackId === selected?.id) {
-      void togglePlayback();
+      if (audioRef.current?.paused) void togglePlayback();
       return;
     }
     playAfterLoadRef.current = true;
@@ -1184,7 +1207,7 @@ export default function App() {
   );
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-hidden" : ""} ${view === "library" || view === "play" ? "player-visible" : ""}`}>
       <audio
         ref={audioRef}
         src={selected?.mediaUrl}
@@ -1216,7 +1239,7 @@ export default function App() {
             PRISMATIC
             <span className="brand-version">{typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : ""}</span>
           </div>
-          <Menu size={16} className="brand-menu" />
+          <button type="button" className="brand-menu" onClick={() => setSidebarCollapsed(true)} aria-label="Hide navigation" title="Hide navigation"><Menu size={16} /></button>
         </div>
         <nav className="primary-nav" aria-label="Primary navigation">
           {nav.map(({id, label, icon: Icon}) => (
@@ -1227,74 +1250,21 @@ export default function App() {
         </nav>
         <div className="library-heading">
           <span>Playlists</span>
-          <button type="button" onClick={() => {setView("playlists"); setSidebarOpen(false);}} aria-label="Open playlists"><Plus size={16} /></button>
+          <button type="button" onClick={() => {setView("playlists"); setSidebarOpen(false); setPlaylistCreateRequest((value) => value + 1);}} aria-label="Create playlist"><Plus size={16} /></button>
         </div>
         {sidebarPlaylists}
       </aside>
 
       <section className="workspace">
+        {sidebarCollapsed ? <button type="button" className="sidebar-restore" onClick={() => setSidebarCollapsed(false)} aria-label="Show navigation" title="Show navigation"><Menu size={17} /></button> : null}
         <header className="mobile-header"><button onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><Menu /></button><span>PRISMATIC</span></header>
-        {false && view === "library" && (
-          <div className="utility-view library-view">
-            <div className="utility-heading library-heading-bar">
-              <div>
-                <span>Library</span>
-                <h1>Your collection.</h1>
-                <p>Double-click a track to play. Export videos from Studio.</p>
-              </div>
-              <label className="library-search">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  value={libraryQuery}
-                  onChange={(e) => setLibraryQuery(e.target.value)}
-                  placeholder="Search title, artist, album…"
-                  aria-label="Search library"
-                />
-                {libraryQuery && (
-                  <button type="button" className="icon-btn" onClick={() => setLibraryQuery("")} aria-label="Clear search"><X size={14} /></button>
-                )}
-              </label>
-            </div>
-            <div className="library-main-list custom-scroll">
-              {filteredTracks.map((track) => (
-                <div key={track.id} className={`library-card ${selected?.id === track.id ? "selected" : ""}`}>
-                  <button
-                    type="button"
-                    className="library-card-main"
-                    onClick={() => selectTrack(track.id)}
-                    onDoubleClick={() => {
-                      playAfterLoadRef.current = true;
-                      selectTrack(track.id);
-                      setView("play");
-                    }}
-                  >
-                    <TrackCover track={track} />
-                    <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}{track.album ? ` · ${track.album}` : ""} · {track.folder}</small></span>
-                    <time className="mono">{formatTime(track.duration)}</time>
-                  </button>
-                  <button
-                    type="button"
-                    className="track-remove"
-                    title="Remove from library"
-                    aria-label={`Remove ${track.title}`}
-                    disabled={removingId === track.id}
-                    onClick={() => void removeTrack(track.id, track.title)}
-                  >
-                    {removingId === track.id ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}
-                  </button>
-                </div>
-              ))}
-              {!loading && tracks.length === 0 && <p className="empty-library">No tracks yet. Use Import or watch a folder.</p>}
-              {!loading && tracks.length > 0 && filteredTracks.length === 0 && <p className="empty-library">No matches for “{libraryQuery}”.</p>}
-            </div>
-          </div>
-        )}
         {view === "library" && (
           <LibraryView
             tracks={tracks}
             playlists={playlists}
             selectedId={selected?.id || ""}
             loading={loading}
+            removingId={removingId}
             query={libraryQuery}
             mode={libraryMode}
             sort={librarySort}
@@ -1302,12 +1272,10 @@ export default function App() {
             onQuery={setLibraryQuery}
             onMode={setLibraryMode}
             onSort={setLibrarySort}
-            onSelect={selectTrack}
             onPlay={playTrack}
-            onPlayNext={(id) => setQueue((current) => enqueueNext(current, id))}
-            onAddQueue={(id) => setQueue((current) => enqueueLast(current, id))}
             onAddPlaylist={(playlistId, trackId) => void addTrackToPlaylist(playlistId, trackId)}
             onRemove={(id, trackTitle) => void removeTrack(id, trackTitle)}
+            onClear={clearLibrary}
             onImportFiles={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()}
             onImportFolder={() => isTauri ? void browseImportFolder() : folderInputRef.current?.click()}
           />
@@ -1336,8 +1304,9 @@ export default function App() {
             tracks={tracks}
             TrackCover={TrackCover}
             busy={loading}
-            onCreate={async (name) => {
-              await playlistStore.create(name);
+            createRequest={playlistCreateRequest}
+            onCreate={async (name, trackIds) => {
+              await playlistStore.create(name, trackIds);
               setPlaylists(playlistStore.list());
             }}
             onRename={async (id, name) => {
@@ -1510,21 +1479,26 @@ export default function App() {
               <p className="save-hint">{selected ? `${selected.artist} · ${selected.format}` : "Pick a track in Library first."}</p>
               <div className="studio-settings-grid">
                 <label>Resolution
-                  <select value={resolution} onChange={(event) => setResolution(event.target.value as ResolutionPreset)}>
-                    <option value="720p">1280 × 720 · HD</option>
-                    <option value="1080p">1920 × 1080 · Full HD</option>
-                    <option value="4k">3840 × 2160 · 4K</option>
-                    <option value="square">1080 × 1080 · Square</option>
-                    <option value="portrait">1080 × 1920 · Portrait</option>
-                  </select>
+                  <CustomSelect
+                    ariaLabel="Resolution"
+                    value={resolution}
+                    onChange={(value) => setResolution(value as ResolutionPreset)}
+                    options={[
+                      {value: "720p", label: "1280 × 720 · HD"},
+                      {value: "1080p", label: "1920 × 1080 · Full HD"},
+                      {value: "4k", label: "3840 × 2160 · 4K"},
+                      {value: "square", label: "1080 × 1080 · Square"},
+                      {value: "portrait", label: "1080 × 1920 · Portrait"},
+                    ]}
+                  />
                 </label>
                 <label>Audio bitrate
-                  <select value={audioBitrate} onChange={(event) => setAudioBitrate(Number(event.target.value) as 128 | 192 | 256 | 320)}>
-                    <option value="128">128 kbps</option>
-                    <option value="192">192 kbps</option>
-                    <option value="256">256 kbps</option>
-                    <option value="320">320 kbps</option>
-                  </select>
+                  <CustomSelect
+                    ariaLabel="Audio bitrate"
+                    value={String(audioBitrate)}
+                    onChange={(value) => setAudioBitrate(Number(value) as 128 | 192 | 256 | 320)}
+                    options={[128, 192, 256, 320].map((value) => ({value: String(value), label: `${value} kbps`}))}
+                  />
                 </label>
               </div>
               <p className="save-hint mono">{visualsFileName(title || selected?.title || "Track")}</p>
@@ -1637,7 +1611,7 @@ export default function App() {
         })}
       />
 
-      <PersistentPlayer
+      {(view === "library" || view === "play") ? <PersistentPlayer
         track={selected}
         playing={playing}
         currentTime={currentTime}
@@ -1673,14 +1647,14 @@ export default function App() {
         onOpenNowPlaying={() => setView("play")}
         onToggleQueue={() => setQueueOpen((open) => !open)}
         onToggleCompact={() => void toggleCompact()}
-      />
+      /> : null}
 
       {error && <button className="error-toast" onClick={() => setError("")}><span>{error}</span><X size={16} /></button>}
 
       {confirmDialog && (
         <div className="confirm-overlay" role="presentation" onClick={() => setConfirmDialog(null)}>
           <div
-            className={`confirm-dialog ${confirmDialog.mode === "track-remove" ? "confirm-dialog-wide" : ""}`}
+            className="confirm-dialog"
             role="dialog"
             aria-modal="true"
             aria-labelledby="confirm-title"
@@ -1693,75 +1667,6 @@ export default function App() {
               </button>
             </div>
             <p>{confirmDialog.body}</p>
-
-            {confirmDialog.mode === "track-remove" && confirmDialog.trackId && (
-              <div className="confirm-actions confirm-actions-stack">
-                <button type="button" className="confirm-cancel" onClick={() => setConfirmDialog(null)}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="confirm-ok soft"
-                  autoFocus
-                  onClick={() => {
-                    const id = confirmDialog.trackId!;
-                    setConfirmDialog(null);
-                    void executeRemoveTrack(id, false);
-                  }}
-                >
-                  Remove from playlist
-                </button>
-                <button
-                  type="button"
-                  className="confirm-ok danger"
-                  onClick={() => {
-                    setConfirmDialog({
-                      mode: "track-remove-disk",
-                      title: "Delete from disk?",
-                      body: `Permanently delete “${confirmDialog.trackTitle}” from disk? This cannot be undone.`,
-                      trackId: confirmDialog.trackId,
-                      trackTitle: confirmDialog.trackTitle,
-                      confirmLabel: "Delete from disk",
-                      danger: true,
-                    });
-                  }}
-                >
-                  Remove from disk
-                </button>
-              </div>
-            )}
-
-            {confirmDialog.mode === "track-remove-disk" && confirmDialog.trackId && (
-              <div className="confirm-actions">
-                <button
-                  type="button"
-                  className="confirm-cancel"
-                  onClick={() => {
-                    setConfirmDialog({
-                      mode: "track-remove",
-                      title: "Remove track",
-                      body: `What should happen to “${confirmDialog.trackTitle}”?`,
-                      trackId: confirmDialog.trackId,
-                      trackTitle: confirmDialog.trackTitle,
-                    });
-                  }}
-                >
-                  Back
-                </button>
-                <button
-                  type="button"
-                  className="confirm-ok danger"
-                  autoFocus
-                  onClick={() => {
-                    const id = confirmDialog.trackId!;
-                    setConfirmDialog(null);
-                    void executeRemoveTrack(id, true);
-                  }}
-                >
-                  {confirmDialog.confirmLabel || "Delete from disk"}
-                </button>
-              </div>
-            )}
 
             {confirmDialog.mode === "simple" && (
               <div className="confirm-actions">
