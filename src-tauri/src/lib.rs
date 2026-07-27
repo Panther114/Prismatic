@@ -998,16 +998,17 @@ mod deletion_tests {
 
     #[test]
     fn managed_path_guard_accepts_children() {
-        let root = Path::new("C:\\Users\\Example\\Music\\Prismatic");
-        let track = Path::new("C:\\Users\\Example\\Music\\Prismatic\\song.mp3");
-        assert!(ensure_managed_path(root, track).is_ok());
+        // Use relative components so tests pass on Windows and Unix CI runners.
+        let root = Path::new("Users").join("Example").join("Music").join("Prismatic");
+        let track = root.join("song.mp3");
+        assert!(ensure_managed_path(&root, &track).is_ok());
     }
 
     #[test]
     fn managed_path_guard_rejects_external_sources() {
-        let root = Path::new("C:\\Users\\Example\\Music\\Prismatic");
-        let track = Path::new("D:\\Imported Music\\song.mp3");
-        assert!(ensure_managed_path(root, track).is_err());
+        let root = Path::new("Users").join("Example").join("Music").join("Prismatic");
+        let track = Path::new("Imported Music").join("song.mp3");
+        assert!(ensure_managed_path(&root, &track).is_err());
     }
 }
 

@@ -149,6 +149,7 @@ jobs:
 
   publish:
     needs: [windows, macos]
+    if: always() && needs.windows.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out release
@@ -161,6 +162,7 @@ jobs:
           path: artifacts/windows
 
       - name: Download macOS artifacts
+        if: needs.macos.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: macos-bundles
@@ -176,9 +178,15 @@ jobs:
             echo "No release artifacts found" >&2
             exit 1
           fi
-          gh release create "${{ github.ref_name }}" \
-            "${files[@]}" \
-            --verify-tag \
-            --latest \
-            --title "Prismatic $version" \
-            --notes-file RELEASE_NOTES.md
+          echo "Publishing ${#files[@]} artifact(s)"
+          printf '%s\n' "${files[@]}"
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber
+          else
+            gh release create "${{ github.ref_name }}" \
+              "${files[@]}" \
+              --verify-tag \
+              --latest \
+              --title "Prismatic $version" \
+              --notes-file RELEASE_NOTES.md
+          fi
