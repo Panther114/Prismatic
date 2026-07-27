@@ -1,6 +1,6 @@
-# Prismatic 2.1
+# Prismatic 2.1.1
 
-Prismatic is a lightweight, listening-first music player for Windows and the web. It combines a fast everyday library and persistent queue with a cinematic audio-reactive Now Playing view and offline video export Studio.
+Prismatic is a lightweight, listening-first music player for Windows, macOS, and the web. It combines a fast everyday library and persistent queue with a cinematic audio-reactive Now Playing view and offline video export Studio.
 
 ## What changed in 2.0
 
@@ -15,12 +15,13 @@ Prismatic preserves `%USERPROFILE%\Music\Prismatic`, its `.prismatic` state dire
 
 ## Requirements
 
-- Windows 10/11 x64 for the desktop app
-- Microsoft Edge WebView2 Runtime (normally already present; the installer downloads its bootstrapper only when required)
+- Windows 10/11 x64 for the desktop app (NSIS installer)
+- macOS 11+ for the desktop app (DMG / `.app`, built on GitHub Actions)
+- Microsoft Edge WebView2 Runtime on Windows (normally already present; the installer downloads its bootstrapper only when required)
 - Current Edge or Chrome for full web functionality
-- Node.js 20.19+ and Rust stable MSVC to build from source
+- Node.js 20.19+ and Rust stable (MSVC on Windows) to build from source
 
-The release installer is currently unsigned.
+Desktop installers are currently **unsigned**. Windows may show SmartScreen; verify the published SHA-256 checksums on the GitHub Release.
 
 ## Development
 
@@ -29,8 +30,9 @@ pnpm install
 pnpm dev                 # web/local server at http://localhost:4100
 pnpm test
 pnpm check
-pnpm tauri:dev           # Windows desktop shell
-pnpm dist:win            # release NSIS installer + verification
+pnpm tauri:dev           # desktop shell (Windows / macOS host)
+pnpm dist:win            # Windows NSIS installer + verification
+pnpm tauri build --bundles app,dmg   # macOS packages (macOS host or CI)
 ```
 
 The public Railway deployment remains supported:

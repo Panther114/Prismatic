@@ -253,11 +253,48 @@ fn cached_cover(paths: &LibraryPaths, id: &str, bytes: &[u8]) -> Option<String> 
     }
     let directory = paths.state_directory.join("covers");
     fs::create_dir_all(&directory).ok()?;
-    let file = directory.join(format!("{id}.{}", image_extension(bytes)));
-    if !file.exists() {
+    let ext = image_extension(bytes);
+    let file = directory.join(format!("{id}.{ext}"));
+    // Refresh when missing or when embedded art changed (size mismatch is a cheap proxy).
+    let needs_write = match fs::metadata(&file) {
+        Ok(meta) => meta.len() as usize != bytes.len(),
+        Err(_) => true,
+    };
+    if needs_write {
+        // Drop stale covers for this track that used a different extension.
+        if let Ok(entries) = fs::read_dir(&directory) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(&format!("{id}.")) && name != format!("{id}.{ext}") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         fs::write(&file, bytes).ok()?;
     }
     Some(file.to_string_lossy().into_owned())
+}
+
+/// After importing files into the managed music root, unhide matching track ids
+/// so a re-import of a previously removed track becomes visible again.
+fn unhide_imported_basenames(paths: &LibraryPaths, basenames: &[String]) -> Result<(), String> {
+    if basenames.is_empty() {
+        return Ok(());
+    }
+    let imported_ids: HashSet<String> = basenames
+        .iter()
+        .map(|name| track_id("music", name))
+        .collect();
+    let mut config = settings(paths);
+    let before = config.hidden.len();
+    config
+        .hidden
+        .retain(|id| !imported_ids.contains(id.as_str()));
+    if config.hidden.len() != before {
+        write_json(&paths.state_directory.join("settings.json"), &config)?;
+    }
+    Ok(())
 }
 
 fn settings(paths: &LibraryPaths) -> Settings {
@@ -590,7 +627,8 @@ fn copy_to_library(paths: &LibraryPaths, source: &Path) -> Result<Option<String>
         let source_size = fs::metadata(source).map_err(display_err)?.len();
         let destination_size = fs::metadata(&destination).map_err(display_err)?.len();
         if source_size == destination_size {
-            return Ok(None);
+            // Already present — still return the basename so re-imports can unhide.
+            return Ok(Some(name.to_owned()));
         }
         let stem = source
             .file_stem()
@@ -620,9 +658,13 @@ fn import_paths(
     paths: State<LibraryPaths>,
     files: Vec<String>,
 ) -> Result<Vec<DesktopTrack>, String> {
+    let mut imported_names = Vec::new();
     for file in files {
-        copy_to_library(&paths, Path::new(&file))?;
+        if let Some(name) = copy_to_library(&paths, Path::new(&file))? {
+            imported_names.push(name);
+        }
     }
+    unhide_imported_basenames(&paths, &imported_names)?;
     GENERATION.fetch_add(1, Ordering::Relaxed);
     scan_tracks(&paths)
 }
@@ -637,15 +679,32 @@ fn import_folder(
     if !root.is_dir() {
         return Err("Path is not a folder".into());
     }
+    // WalkDir depth: 0 = root only (no children). Files in the chosen folder are depth 1.
+    // UI depth 0 ⇒ only that folder; UI depth N ⇒ N subfolder levels under it.
+    // So max_depth = folder_depth + 1 (not +2).
+    let walk_depth = max_depth.saturating_add(1);
+    let mut imported_names = Vec::new();
     for entry in WalkDir::new(&root)
-        .max_depth(max_depth.saturating_add(2))
+        .max_depth(walk_depth)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && is_audio(entry.path()))
     {
-        copy_to_library(&paths, entry.path())?;
+        // Enforce UI depth: parts under root (file depth = relative components after root − 1 for file).
+        let rel = entry
+            .path()
+            .strip_prefix(&root)
+            .unwrap_or(entry.path());
+        let file_depth = rel.components().count().saturating_sub(1);
+        if file_depth > max_depth {
+            continue;
+        }
+        if let Some(name) = copy_to_library(&paths, entry.path())? {
+            imported_names.push(name);
+        }
     }
+    unhide_imported_basenames(&paths, &imported_names)?;
     GENERATION.fetch_add(1, Ordering::Relaxed);
     scan_tracks(&paths)
 }
@@ -963,6 +1022,13 @@ mod tests {
             track_id("music", "Album\\Song.MP3"),
             track_id("music", "album/song.mp3")
         );
+    }
+
+    #[test]
+    fn reimport_track_id_matches_managed_basename() {
+        // Soft-hidden ids use the same derivation as music-root basenames after import.
+        assert_eq!(track_id("music", "Song.mp3"), track_id("music", "song.mp3"));
+        assert_eq!(track_id("music", "Album/Track.flac").len(), 14);
     }
 
     #[test]

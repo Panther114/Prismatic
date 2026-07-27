@@ -3,14 +3,20 @@ import {promises as fs} from "node:fs";
 import path from "node:path";
 
 const pkg = JSON.parse(await fs.readFile(path.resolve("package.json"), "utf8"));
-const installer = path.resolve(
-  "src-tauri",
-  "target",
-  "release",
-  "bundle",
-  "nsis",
-  `Prismatic_${pkg.version}_x64-setup.exe`,
-);
+// Prefer current binary naming; fall back to any matching NSIS setup in the folder.
+const nsisDir = path.resolve("src-tauri", "target", "release", "bundle", "nsis");
+const preferred = path.join(nsisDir, `Prismatic_${pkg.version}_x64-setup.exe`);
+let installer = preferred;
+try {
+  await fs.access(preferred);
+} catch {
+  const entries = await fs.readdir(nsisDir).catch(() => []);
+  const match = entries.find((name) => name.endsWith("-setup.exe") && name.includes(pkg.version));
+  if (!match) {
+    throw new Error(`Installer not found under ${nsisDir} for version ${pkg.version}`);
+  }
+  installer = path.join(nsisDir, match);
+}
 const bytes = await fs.readFile(installer);
 const sizeMiB = bytes.byteLength / 1024 / 1024;
 if (sizeMiB > 20) {

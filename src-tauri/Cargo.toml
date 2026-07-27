@@ -1,9 +1,18 @@
 [package]
 name = "prismatic"
-version = "2.1.0"
+version = "2.1.1"
 description = "A lightweight cinematic music player and visual exporter"
 authors = ["Prismatic"]
 edition = "2021"
+
+# Windows PE version resource fields (taskbar / Explorer identity)
+[package.metadata.tauri-winres]
+OriginalFilename = "Prismatic.exe"
+InternalName = "Prismatic"
+ProductName = "Prismatic"
+FileDescription = "Prismatic"
+LegalCopyright = "Prismatic"
+CompanyName = "Prismatic"
 
 [lib]
 name = "prismatic_lib"

@@ -1,22 +1,24 @@
-# Prismatic 2.1.0
+# Prismatic 2.1.1
 
-## Highlights
+## Bug fixes
 
-- Added a collapsible desktop sidebar and reclaimed the full workspace in focused views.
-- Made library songs play on a single click and improved the Space playback shortcut.
-- Rebuilt playlist creation and editing around fast click-to-toggle membership with reorder support.
-- Dramatically increased library and playlist density with smaller artwork, compact controls, and more visible rows.
-- Replaced track overflow menus with direct add-to-playlist and remove buttons.
-- Added custom dropdowns, custom seek/volume sliders, and high-contrast missing-art placeholders.
-- Added a confirmed Clear Library reset and hardened deletion so imported or watched source files outside Prismatic are never touched.
-- Hidden the bottom player outside Library and Now Playing so Studio, Settings, and Playlists use the full window.
+- **Taskbar pin / shortcuts:** Installer now writes Start Menu and Desktop shortcuts with an explicit icon path and `AppUserModelID` (`app.prismatic.desktop`), matching the running process so pins no longer show blank icons or spawn a second taskbar entry.
+- **Windows app identity:** Packaged binary is `Prismatic.exe` with complete PE version metadata (`OriginalFilename`, `InternalName`, publisher, copyright).
+- **Electron → Tauri cleanup:** Installer removes leftover Electron updater residue and Chromium profile caches under `%APPDATA%\Prismatic` without touching `%USERPROFILE%\Music\Prismatic`.
+- **Re-import after remove:** Desktop re-imports unhide previously removed tracks so they reappear in the library.
+- **Cover art cache:** Embedded artwork is refreshed when the image changes instead of keeping a stale cover forever.
+- **Folder import depth:** Desktop folder scan depth matches the UI (0 = only files in the chosen folder).
+- **Player preferences:** Compact player mode is restored after restart; prefs no longer race and overwrite disk settings on startup.
+- **Remove while playing:** Removing the current track advances to the next queue item and continues playback when it was playing.
+- **Library virtualization:** Song list measures its real viewport on mount and resize (no sparse rows until first scroll).
+- **Clear library:** Desktop/local clear always hits the disk API; cloud mode only clears browser storage—no mixed wipe.
+- **Playlists player chrome:** Bottom transport stays visible on Library and Playlists so starting a playlist shows immediate playback UI.
 
-## Upgrade notes
+## Release notes
 
-Installing 2.1.0 preserves the existing `%USERPROFILE%\Music\Prismatic` library and `.prismatic` state. Track IDs, playlists, queue state, and player preferences remain compatible with 2.0.0.
+- Version **2.1.1** (Windows NSIS + macOS DMG via GitHub Actions when tagged).
+- Installers remain **unsigned**. Windows may show SmartScreen until a code-signing certificate is configured. Verify downloads with the published `.sha256` checksums on the GitHub Release.
 
-The installer is unsigned. Windows may show a reputation warning until a code-signing identity is supplied.
+## Upgrade
 
-## Compatibility
-
-Full desktop support targets modern Windows 10/11 x64. Full web support targets current Edge and Chrome; Firefox and Safari use progressive fallbacks.
+Installing 2.1.1 preserves `%USERPROFILE%\Music\Prismatic` and `.prismatic` state. After upgrading, unpin any broken taskbar icon once and pin again from the Start Menu shortcut so Windows picks up the new AppUserModelID.

@@ -1,4 +1,4 @@
-name: Release Windows installer
+name: Release
 
 on:
   push:
@@ -52,24 +52,133 @@ jobs:
       - name: Run web and server checks
         run: pnpm check
 
+      - name: Run frontend tests
+        run: pnpm test
+
       - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build and verify installer
+      - name: Build and verify Windows installer
         run: pnpm dist:win
 
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            src-tauri/target/release/bundle/nsis/Prismatic_*_x64-setup.exe
+            src-tauri/target/release/bundle/nsis/Prismatic_*_x64-setup.exe.sha256
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.5
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "${{ github.ref_name }}" ]; then
+            echo "Tag ${{ github.ref_name }} does not match package version $version" >&2
+            exit 1
+          fi
+
+      - name: Run web and server checks
+        run: pnpm check
+
+      - name: Run frontend tests
+        run: pnpm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build macOS app bundles
+        run: pnpm tauri build --bundles app,dmg
+
+      - name: Checksum macOS artifacts
+        run: |
+          version=$(node -p "require('./package.json').version")
+          shopt -s nullglob
+          for f in src-tauri/target/release/bundle/dmg/*.dmg \
+                   src-tauri/target/release/bundle/macos/*.app; do
+            if [ -f "$f" ]; then
+              shasum -a 256 "$f" | tee "$f.sha256"
+            fi
+          done
+          # .app is a directory — hash a zip of it for distribution checksum stability
+          for app in src-tauri/target/release/bundle/macos/*.app; do
+            if [ -d "$app" ]; then
+              zip -qry "${app}.zip" "$app"
+              shasum -a 256 "${app}.zip" | tee "${app}.zip.sha256"
+            fi
+          done
+          ls -la src-tauri/target/release/bundle/dmg || true
+          ls -la src-tauri/target/release/bundle/macos || true
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundles
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/dmg/*.sha256
+            src-tauri/target/release/bundle/macos/*.app.zip
+            src-tauri/target/release/bundle/macos/*.app.zip.sha256
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/windows
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-bundles
+          path: artifacts/macos
+
       - name: Publish GitHub Release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = node -p "require('./package.json').version"
-          $installer = (Resolve-Path "src-tauri/target/release/bundle/nsis/Prismatic_${version}_x64-setup.exe").Path
-          $checksum = "$installer.sha256"
-          gh release create "${{ github.ref_name }}" `
-            $installer `
-            $checksum `
-            --verify-tag `
-            --latest `
-            --title "Prismatic $version" `
+          version=$(node -p "require('./package.json').version")
+          mapfile -t files < <(find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sha256' \) | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release artifacts found" >&2
+            exit 1
+          fi
+          gh release create "${{ github.ref_name }}" \
+            "${files[@]}" \
+            --verify-tag \
+            --latest \
+            --title "Prismatic $version" \
             --notes-file RELEASE_NOTES.md

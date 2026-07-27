@@ -1,4 +1,4 @@
-import {useDeferredValue, useMemo, useRef, useState, type ComponentType, type UIEvent} from "react";
+import {useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentType, type UIEvent} from "react";
 import {
   Album, ArrowLeft, Clock3, ListPlus, LoaderCircle, Music2, Plus, Search, Trash2, UserRound, X,
 } from "lucide-react";
@@ -57,6 +57,25 @@ function VirtualTrackList({
   const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
   const end = Math.min(tracks.length, start + visibleCount);
   const visible = tracks.slice(start, end);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const measure = () => {
+      const height = element.clientHeight;
+      if (height > 0) setViewportHeight(height);
+    };
+    measure();
+    const observer = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(measure)
+      : null;
+    observer?.observe(element);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [tracks.length]);
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;

@@ -109,7 +109,9 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(initialPrefs.volume);
   const [muted, setMuted] = useState(initialPrefs.muted);
-  const offlineModeRef = useRef<"local" | "cloud">("cloud");
+  // Desktop/Tauri is always local; cloud only until health proves otherwise (or web cloud).
+  const offlineModeRef = useRef<"local" | "cloud">(isTauri ? "local" : "cloud");
+  const prefsReadyRef = useRef(false);
   const [waveform, setWaveform] = useState<number[]>([]);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -136,6 +138,7 @@ export default function App() {
   const ensureAudioGraphRef = useRef(async () => undefined as void);
 
   queueRef.current = queue;
+  const playerChromeVisible = view === "library" || view === "play" || view === "playlists";
 
   const selected = useMemo(() => tracks.find((track) => track.id === selectedId) || tracks[0], [tracks, selectedId]);
   const activeJob = useMemo(() => jobs.find((job) => job.trackId === selected?.id && ACTIVE_STATUSES.has(job.status)), [jobs, selected?.id]);
@@ -158,9 +161,9 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     const health = await api.health().catch(() => null);
-    // Desktop / local Node always offline-disk; never treat as cloud.
-    let modeCloud = health?.mode === "cloud" && health?.desktop !== true;
-    if (health?.mode === "local") modeCloud = false;
+    // Desktop (Tauri) and local Node always offline-disk; never treat as cloud.
+    let modeCloud = !isTauri && health?.mode === "cloud" && health?.desktop !== true;
+    if (isTauri || health?.mode === "local" || health?.desktop === true) modeCloud = false;
     cloudModeRef.current = modeCloud;
     offlineModeRef.current = modeCloud ? "cloud" : "local";
     setCloudMode(modeCloud);
@@ -174,8 +177,12 @@ export default function App() {
     if (!modeCloud) {
       try {
         serverTracks = await api.tracks();
-      } catch {
-        // Only fall back to cloud if we truly have no local API
+      } catch (cause) {
+        // Desktop must stay on disk mode — surface the error instead of flipping to cloud.
+        if (isTauri) {
+          throw cause instanceof Error ? cause : new Error(String(cause));
+        }
+        // Web local server down: fall back to browser IndexedDB only.
         modeCloud = true;
         cloudModeRef.current = true;
         offlineModeRef.current = "cloud";
@@ -199,7 +206,7 @@ export default function App() {
       return loadQueue(nextTracks.map((track) => track.id), fallback);
     });
 
-    // Shared offline prefs (disk) for local web + Electron
+    // Shared offline prefs (disk) for local web + desktop — gate saves until this finishes.
     try {
       const prefs = await loadPlayerPrefs(modeCloud ? "cloud" : "local");
       setVolume(prefs.volume);
@@ -211,8 +218,18 @@ export default function App() {
       }));
       setLibraryMode(prefs.libraryMode || "songs");
       setLibrarySort(prefs.librarySort || "title");
+      if (prefs.compactPlayer) {
+        try {
+          await setCompactPlayer(true);
+          setCompactPlayerState(true);
+        } catch {
+          setCompactPlayerState(false);
+        }
+      }
     } catch {
       // keep seeded prefs
+    } finally {
+      prefsReadyRef.current = true;
     }
 
     try {
@@ -227,7 +244,7 @@ export default function App() {
       if (meta.musicDirectory) setMusicDirectory(meta.musicDirectory);
       else if (meta.offlineRoot) setMusicDirectory(meta.offlineRoot);
       libraryGenerationRef.current = meta.generation;
-      if (meta.mode === "local") {
+      if (meta.mode === "local" || isTauri) {
         cloudModeRef.current = false;
         offlineModeRef.current = "local";
         setCloudMode(false);
@@ -365,6 +382,8 @@ export default function App() {
   }, [volume, muted]);
 
   useEffect(() => {
+    // Avoid overwriting disk prefs with seed defaults before refresh() loads them.
+    if (!prefsReadyRef.current) return;
     void savePlayerPrefs(offlineModeRef.current, {
       schemaVersion: 2,
       shuffle: queue.shuffle,
@@ -974,7 +993,8 @@ export default function App() {
     setRemovingId(trackId);
     setError("");
     try {
-      const wasPlaying = selectedId === trackId && playing;
+      const wasCurrent = selectedId === trackId;
+      const wasPlaying = wasCurrent && playing;
       if (wasPlaying) audioRef.current?.pause();
       const track = tracks.find((item) => item.id === trackId);
       let serverTracks: Track[] = [];
@@ -988,13 +1008,25 @@ export default function App() {
       }
       const nextTracks = mergeTracks(serverTracks, cloudModeRef.current);
       setTracks(nextTracks);
-      setQueue((q) => removeTrackFromQueue(q, trackId));
+      const nextQueue = removeTrackFromQueue(queueRef.current, trackId);
+      setQueue(nextQueue);
       const stripped = await playlistStore.stripTrack(trackId);
       setPlaylists(stripped);
-      setSelectedId((current) => {
-        if (current !== trackId) return current;
-        return nextTracks[0]?.id || "";
-      });
+
+      if (wasCurrent) {
+        // Prefer the track that now sits at the same queue index (next after removal).
+        const successor = currentId(nextQueue)
+          || nextTracks.find((item) => item.id !== trackId)?.id
+          || "";
+        if (successor) {
+          if (wasPlaying) playAfterLoadRef.current = true;
+          setSelectedId(successor);
+          setQueue((q) => jumpTo(q, successor));
+        } else {
+          setSelectedId("");
+          setPlaying(false);
+        }
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1011,21 +1043,44 @@ export default function App() {
     audioRef.current?.pause();
     setPlaying(false);
     try {
-      const result = cloudModeRef.current
-        ? {
-          tracks: [] as Track[],
+      // Desktop / local disk: always hit the real clear API (never pretend cloud-only wipe).
+      // Cloud web: IndexedDB only.
+      let result: {
+        tracks: Track[];
+        playlists: Playlist[];
+        watchFolders: WatchFolder[];
+        deletedManagedFiles: number;
+        preservedExternalFiles: number;
+        failedManagedFiles: string[];
+      };
+      if (isTauri || !cloudModeRef.current) {
+        result = await api.clearLibrary();
+        // Drop any stray browser-only rows so UI matches disk.
+        await clientLibrary.clear().catch(() => undefined);
+      } else {
+        await clientLibrary.clear();
+        playlistStore.clearLocal();
+        result = {
+          tracks: [],
           playlists: [],
           watchFolders: [],
           deletedManagedFiles: 0,
           preservedExternalFiles: 0,
-          failedManagedFiles: [] as string[],
+          failedManagedFiles: [],
+        };
+      }
+      if (!cloudModeRef.current || isTauri) {
+        playlistStore.clearLocal();
+        try {
+          setPlaylists(await playlistStore.load());
+        } catch {
+          setPlaylists([]);
         }
-        : await api.clearLibrary();
-      await clientLibrary.clear();
-      playlistStore.clearLocal();
+      } else {
+        setPlaylists([]);
+      }
       setTracks(result.tracks);
-      setPlaylists([]);
-      setWatchFolders([]);
+      setWatchFolders(result.watchFolders || []);
       setSelectedId("");
       setQueue(createQueue([], {
         shuffle: queueRef.current.shuffle,
@@ -1207,7 +1262,7 @@ export default function App() {
   );
 
   return (
-    <main className={`app-shell ${sidebarCollapsed ? "sidebar-hidden" : ""} ${view === "library" || view === "play" ? "player-visible" : ""}`}>
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-hidden" : ""} ${playerChromeVisible ? "player-visible" : ""}`}>
       <audio
         ref={audioRef}
         src={selected?.mediaUrl}
@@ -1611,7 +1666,7 @@ export default function App() {
         })}
       />
 
-      {(view === "library" || view === "play") ? <PersistentPlayer
+      {playerChromeVisible ? <PersistentPlayer
         track={selected}
         playing={playing}
         currentTime={currentTime}
