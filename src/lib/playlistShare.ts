@@ -215,31 +215,46 @@ export async function redeemPlaylistShare(
   const normalized = String(code || "").replace(/\D/g, "").slice(0, 4);
   if (normalized.length !== 4) throw new Error("Enter a 4-digit share code.");
 
-  options.onProgress?.("Looking up share…", 0.02);
-
-  type Manifest = Awaited<ReturnType<typeof api.getPlaylistShare>>;
-  let manifest: Manifest;
-
-  if (isTauri) {
+  // Desktop: one native redeem (wake once, stream each track to disk — no multi-MB IPC).
+  if (isTauri && !options.cloudMode) {
     const {invoke} = await import("@tauri-apps/api/core");
     const {listen} = await import("@tauri-apps/api/event");
     const {getConfiguredShareBase} = await import("./shareHost");
+    options.onProgress?.("Starting import…", 0.02);
     const unlisten = await listen<{message?: string}>("share-progress", (event) => {
       const message = event.payload?.message;
-      if (message) options.onProgress?.(message, 0.06);
+      if (message) options.onProgress?.(message, 0.45);
     });
     try {
-      options.onProgress?.("Waking share server…", 0.04);
-      manifest = await invoke<Manifest>("share_get_manifest", {
+      const result = await invoke<{
+        name: string;
+        trackIds: string[];
+        imported: number;
+        skipped: number;
+      }>("share_redeem_to_library", {
         baseUrl: getConfiguredShareBase(),
         code: normalized,
       });
+      options.onProgress?.("Forging playlist…", 0.92);
+      await options.refreshTracks();
+      if (!result.trackIds?.length) {
+        throw new Error("Tracks downloaded but none could be matched into the library.");
+      }
+      const playlist = await playlistStore.create(result.name || "Shared playlist", result.trackIds);
+      options.onProgress?.("Done", 1);
+      return {
+        playlist,
+        imported: result.imported ?? 0,
+        skipped: result.skipped ?? 0,
+      };
     } finally {
       unlisten();
     }
-  } else {
-    manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
   }
+
+  options.onProgress?.("Looking up share…", 0.02);
+  type Manifest = Awaited<ReturnType<typeof api.getPlaylistShare>>;
+  const manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
 
   const limits = validateShareLimits(
     manifest.tracks.map((t) => ({
@@ -268,24 +283,11 @@ export async function redeemPlaylistShare(
       `Downloading ${i + 1}/${manifest.tracks.length}: ${meta.title}`,
       0.05 + (i / manifest.tracks.length) * 0.7,
     );
-    let blob: Blob;
-    if (isTauri) {
-      const {invoke} = await import("@tauri-apps/api/core");
-      const {getConfiguredShareBase} = await import("./shareHost");
-      const raw = await invoke<number[] | Uint8Array>("share_download_track", {
-        baseUrl: getConfiguredShareBase(),
-        code: normalized,
-        index: meta.index,
-      });
-      const u8 = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
-      blob = new Blob([u8], {type: meta.contentType || "audio/mpeg"});
-    } else {
-      blob = await api.downloadPlaylistShareTrack(
-        normalized,
-        meta.index,
-        (message) => options.onProgress?.(message, 0.05 + (i / manifest.tracks.length) * 0.7),
-      );
-    }
+    const blob = await api.downloadPlaylistShareTrack(
+      normalized,
+      meta.index,
+      (message) => options.onProgress?.(message, 0.05 + (i / manifest.tracks.length) * 0.7),
+    );
     const type = meta.contentType || blob.type || "audio/mpeg";
     files.push(new File([blob], meta.fileName, {type}));
   }
@@ -300,16 +302,6 @@ export async function redeemPlaylistShare(
   if (options.cloudMode) {
     const result = await clientLibrary.importFiles(files);
     imported = result.imported.length;
-    skipped = result.skipped;
-  } else if (isTauri && api.importAudioBytes) {
-    const payloads = await Promise.all(
-      files.map(async (file) => ({
-        fileName: file.name,
-        bytes: new Uint8Array(await file.arrayBuffer()),
-      })),
-    );
-    const result = await api.importAudioBytes(payloads);
-    imported = result.imported;
     skipped = result.skipped;
   } else {
     const result = await api.importAudio(files);

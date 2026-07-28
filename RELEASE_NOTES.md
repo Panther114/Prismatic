@@ -1,15 +1,20 @@
-# Prismatic 2.1.8
+# Prismatic 2.1.9
 
-## Fixes
+## Speed + freeze (share)
 
-1. **Share no longer freezes the app** — packing/upload runs on a **background thread** with live progress events (`share-progress`). The share dialog keeps updating instead of going non-responsive during “Uploading…”.
-2. **Edit/create playlist Save bar** — dialogs sit **above** the bottom player and leave bottom padding so **Save / Cancel** are never covered.
-3. **Faster release builds** — CI no longer double-runs tests + full `pnpm check`; Rust uses **thin LTO** (was full LTO).
+**2.1.7 felt frozen and ~30s per track.** Two separate problems:
 
-## Share reliability
+| Issue | Cause | Fix |
+|--------|--------|-----|
+| **Freeze** | Blocking Rust share command held the UI thread | **2.1.8+**: background `spawn_blocking` + live progress events |
+| **Slow download** | **Wake Railway on every track** + push each file through JS IPC twice | **2.1.9**: wake **once**; stream download **straight to library disk** |
+| **Slow upload** | Load every MP3 into RAM and **clone** for multipart | **2.1.9**: stream with `Part::file` from disk |
 
-Desktop share still uses **native Rust HTTP** to Railway (not WebView fetch), with cold-start wake + retries.
+## Also in 2.1.8+
+
+- Edit/create playlist dialog above the player (Save not covered)
+- Faster CI release builds
 
 ## Upgrade
 
-Install 2.1.8. Library under `Music/Prismatic` is preserved.
+Install **2.1.9**. Do not stay on 2.1.7 for share.
