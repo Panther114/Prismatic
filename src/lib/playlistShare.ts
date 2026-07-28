@@ -130,7 +130,7 @@ export async function createPlaylistShare(
   }
   form.append("tracks", JSON.stringify(meta));
   onProgress?.("Uploading share package…", tracks.length / (tracks.length + 1));
-  return api.createPlaylistShare(form);
+  return api.createPlaylistShare(form, (message) => onProgress?.(message, tracks.length / (tracks.length + 1)));
 }
 
 export async function redeemPlaylistShare(
@@ -145,7 +145,7 @@ export async function redeemPlaylistShare(
   if (normalized.length !== 4) throw new Error("Enter a 4-digit share code.");
 
   options.onProgress?.("Looking up share…", 0.02);
-  const manifest = await api.getPlaylistShare(normalized);
+  const manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
   const limits = validateShareLimits(
     manifest.tracks.map((t) => ({
       id: String(t.index),
@@ -173,8 +173,12 @@ export async function redeemPlaylistShare(
       `Downloading ${i + 1}/${manifest.tracks.length}: ${meta.title}`,
       0.05 + (i / manifest.tracks.length) * 0.7,
     );
-    // Sequential downloads keep Railway egress/CPU gentle.
-    const blob = await api.downloadPlaylistShareTrack(normalized, meta.index);
+    // Sequential downloads keep Railway egress/CPU gentle; cold-start retries inside api.
+    const blob = await api.downloadPlaylistShareTrack(
+      normalized,
+      meta.index,
+      (message) => options.onProgress?.(message, 0.05 + (i / manifest.tracks.length) * 0.7),
+    );
     const type = meta.contentType || blob.type || "audio/mpeg";
     files.push(new File([blob], meta.fileName, {type}));
   }

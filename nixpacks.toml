@@ -1,10 +1,8 @@
-# Express serves the SPA — do not use Caddy (Nixpacks SPA path for Vite).
-# https://nixpacks.com/docs/providers/node#caddy
+# Share-only deploy: no Vite SPA, no Caddy.
 providers = ["node"]
 
 [variables]
 NIXPACKS_SPA_CADDY = "false"
-# Ensure cloud semantics at runtime (also set on the start command).
 PRISMATIC_CLOUD = "1"
 NODE_ENV = "production"
 
@@ -12,18 +10,14 @@ NODE_ENV = "production"
 nixPkgs = ["nodejs_22", "pnpm"]
 
 [phases.install]
-# Full install so Vite can build the SPA. Runtime uses the self-contained
-# cloud.mjs bundle and does not need node_modules after prune.
 cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]
-# Bundle SPA + full server (desktop artifact) + slim cloud server, then drop
-# node_modules so the deploy image only needs Node + dist + dist-server.
+# Bundle cloud.mjs (+ full index for artifact parity). Drop node_modules — cloud bundle is self-contained.
 cmds = [
-  "pnpm build && pnpm build:server",
-  "rm -rf node_modules",
+  "pnpm build:server",
+  "rm -rf node_modules dist",
 ]
 
 [start]
-# Slim entry only — no music-metadata / library. Heap hard-capped.
-cmd = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs"
+cmd = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=128 dist-server/cloud.mjs"

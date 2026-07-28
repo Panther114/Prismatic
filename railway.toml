@@ -1,23 +1,22 @@
-# Prismatic — one-click Railway deploy
-# Video export runs entirely in the user's browser.
-# Runtime: slim cloud.mjs (SPA + health + disk playlist-share). No library stack.
+# Prismatic — share-only Railway service (no website).
+# Desktop app talks to https://prismatic.up.railway.app for playlist codes.
+# Enable Serverless (App Sleeping) in the Railway dashboard so idle RAM ≈ 0.
 
 [build]
 builder = "NIXPACKS"
-# Install already runs in nixpacks install phase — only build here.
-buildCommand = "pnpm build && pnpm build:server"
+# Server bundle only — do not build or ship the SPA.
+buildCommand = "pnpm build:server"
 
 [deploy]
-# Single instance; heap capped so spikes OOM the request instead of multi-GB RSS.
-# PRISMATIC_CLOUD=1 forces cloud stubs even if env is misconfigured.
-startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs"
+# Share API only. Heap capped; PRISMATIC_CLOUD forces cloud stubs if anything misloads.
+startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=128 dist-server/cloud.mjs"
+# Longer timeout: first health after cold start can take several seconds.
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Keep one replica (set the same in Railway dashboard if UI overrides this).
 numReplicas = 1
 
-# Kill Vite→Caddy SPA mode; we run Node/Express (see nixpacks.toml).
-# Also set this in Railway dashboard Variables if the plan still shows caddy.
-# NIXPACKS_SPA_CADDY=false
+# REQUIRED for cold-start / idle RAM savings (dashboard):
+# Service → Settings → Serverless → Enable
+# (formerly "App Sleeping"). Without this, the container stays warm 24/7.

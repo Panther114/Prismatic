@@ -1,9 +1,9 @@
 {
   "name": "prismatic",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "private": true,
   "author": "Prismatic",
-  "description": "Prismatic — cinematic music visualizer & player. Browser-side export keeps the host lightweight.",
+  "description": "Prismatic — cinematic music visualizer & desktop player. Playlist share API is serverless-friendly on Railway.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "engines": {
@@ -13,7 +13,7 @@
     "dev": "tsx server/index.ts",
     "build": "vite build",
     "build:server": "node scripts/build-server.mjs",
-    "start": "cross-env NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs",
+    "start": "cross-env NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=128 dist-server/cloud.mjs",
     "start:full": "cross-env NODE_ENV=production node dist-server/index.mjs",
     "start:ts": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
