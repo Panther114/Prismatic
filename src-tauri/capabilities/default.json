@@ -11,6 +11,8 @@
     "core:window:allow-set-resizable",
     "core:window:allow-center",
     "dialog:default",
-    "opener:default"
+    "opener:default",
+    "updater:default",
+    "process:default"
   ]
 }

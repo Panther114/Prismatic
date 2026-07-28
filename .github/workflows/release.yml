@@ -12,6 +12,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Updater signatures (minisign). Required when createUpdaterArtifacts is true.
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -48,6 +53,9 @@ jobs:
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match package version $version"
           }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "TAURI_SIGNING_PRIVATE_KEY secret is missing (required for updater signatures)"
+          }
 
       - name: Run web and server checks
         run: pnpm check
@@ -61,12 +69,25 @@ jobs:
       - name: Build and verify Windows installer
         run: pnpm dist:win
 
+      - name: Assert updater signature exists
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $sig = "src-tauri/target/release/bundle/nsis/Prismatic_${version}_x64-setup.exe.sig"
+          if (-not (Test-Path $sig)) {
+            throw "Missing updater signature: $sig"
+          }
+          $text = (Get-Content $sig -Raw).Trim()
+          if ($text.Length -lt 32) { throw "Signature file too short: $sig" }
+          Write-Host "OK signature $($text.Length) chars"
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: |
             src-tauri/target/release/bundle/nsis/Prismatic_*_x64-setup.exe
+            src-tauri/target/release/bundle/nsis/Prismatic_*_x64-setup.exe.sig
             src-tauri/target/release/bundle/nsis/Prismatic_*_x64-setup.exe.sha256
 
   macos:
@@ -104,6 +125,10 @@ jobs:
             echo "Tag ${{ github.ref_name }} does not match package version $version" >&2
             exit 1
           fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY secret is missing (required for updater signatures)" >&2
+            exit 1
+          fi
 
       - name: Run web and server checks
         run: pnpm check
@@ -117,17 +142,36 @@ jobs:
       - name: Build macOS app bundles
         run: pnpm tauri build --bundles app,dmg
 
-      - name: Checksum macOS artifacts
+      - name: Checksum and assert updater artifacts
         run: |
+          set -euo pipefail
           version=$(node -p "require('./package.json').version")
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/dmg/*.dmg \
-                   src-tauri/target/release/bundle/macos/*.app; do
+                   src-tauri/target/release/bundle/macos/*.app.tar.gz; do
             if [ -f "$f" ]; then
               shasum -a 256 "$f" | tee "$f.sha256"
             fi
           done
-          # .app is a directory — hash a zip of it for distribution checksum stability
+          # Updater payload + signature (required)
+          tars=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          if [ ${#tars[@]} -eq 0 ]; then
+            echo "Missing macOS updater archive (*.app.tar.gz)" >&2
+            exit 1
+          fi
+          for tar in "${tars[@]}"; do
+            if [ ! -f "${tar}.sig" ]; then
+              echo "Missing signature for $tar" >&2
+              exit 1
+            fi
+            chars=$(wc -c < "${tar}.sig" | tr -d ' ')
+            if [ "$chars" -lt 32 ]; then
+              echo "Signature too short: ${tar}.sig" >&2
+              exit 1
+            fi
+            echo "OK $(basename "$tar") + sig ($chars bytes)"
+          done
+          # Optional convenience zip of .app for manual download
           for app in src-tauri/target/release/bundle/macos/*.app; do
             if [ -d "$app" ]; then
               zip -qry "${app}.zip" "$app"
@@ -144,6 +188,9 @@ jobs:
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/dmg/*.sha256
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sha256
             src-tauri/target/release/bundle/macos/*.app.zip
             src-tauri/target/release/bundle/macos/*.app.zip.sha256
 
@@ -168,12 +215,55 @@ jobs:
           name: macos-bundles
           path: artifacts/macos
 
+      - name: Build latest.json updater manifest
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          tag="${{ github.ref_name }}"
+          notes=$(head -c 4000 RELEASE_NOTES.md | tr -d '\000' || true)
+
+          win_exe=$(find artifacts/windows -type f -name 'Prismatic_*_x64-setup.exe' | head -n1)
+          win_sig=$(find artifacts/windows -type f -name 'Prismatic_*_x64-setup.exe.sig' | head -n1)
+          if [ -z "$win_exe" ] || [ -z "$win_sig" ]; then
+            echo "Windows installer or .sig missing" >&2
+            find artifacts -type f | sort
+            exit 1
+          fi
+
+          args=(
+            --version "$version"
+            --tag "$tag"
+            --out artifacts/latest.json
+            --notes "$notes"
+            --windows-x64 "$win_exe"
+            --windows-x64-sig "$win_sig"
+          )
+
+          # Prefer Apple Silicon updater archive (macos-latest is arm64).
+          mac_tar=$(find artifacts/macos -type f -name '*.app.tar.gz' ! -name '*.sig' | head -n1 || true)
+          mac_sig=$(find artifacts/macos -type f -name '*.app.tar.gz.sig' | head -n1 || true)
+          if [ -n "$mac_tar" ] && [ -n "$mac_sig" ]; then
+            # Tauri macOS runners produce aarch64 on macos-latest.
+            args+=(--darwin-aarch64 "$mac_tar" --darwin-aarch64-sig "$mac_sig")
+          fi
+
+          node scripts/write-latest-json.mjs "${args[@]}"
+          node scripts/verify-updater-manifest.mjs artifacts/latest.json
+          echo "---- latest.json ----"
+          cat artifacts/latest.json
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           version=$(node -p "require('./package.json').version")
-          mapfile -t files < <(find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sha256' \) | sort)
+          mapfile -t files < <(find artifacts -type f \( \
+            -name '*.exe' -o -name '*.exe.sig' -o \
+            -name '*.dmg' -o -name '*.zip' -o \
+            -name '*.tar.gz' -o -name '*.tar.gz.sig' -o \
+            -name '*.sha256' -o -name 'latest.json' \
+          \) | sort)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No release artifacts found" >&2
             exit 1

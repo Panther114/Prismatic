@@ -28,7 +28,9 @@ Latest builds: **[GitHub Releases](https://github.com/Panther114/Prismatic/relea
 | Windows 10/11 x64 | `Prismatic_*_x64-setup.exe` |
 | macOS 11+ (Apple Silicon) | `Prismatic_*_aarch64.dmg` |
 
-Installers are **unsigned** for now — Windows may show SmartScreen. Prefer the `.sha256` checksums on the release.
+Installers are **Authenticode-unsigned** for now — Windows may show SmartScreen. Prefer the `.sha256` checksums on the release.
+
+**Auto-update (desktop 2.1.2+):** the app can download signed updates from GitHub Releases via Settings → Software updates (or a quiet startup check). Builds older than 2.1.2 must install 2.1.2 once manually.
 
 Your library lives at `Music/Prismatic` (plus a `.prismatic` state folder). Uninstalling the app does not wipe your music.
 

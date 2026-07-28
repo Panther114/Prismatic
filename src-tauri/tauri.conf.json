@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Prismatic",
   "mainBinaryName": "Prismatic",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "identifier": "app.prismatic.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' customprotocol: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:*; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
+      "csp": "default-src 'self' customprotocol: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:* https://github.com https://*.github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "publisher": "Prismatic",
     "copyright": "Prismatic",
     "icon": [
@@ -61,6 +62,17 @@
     },
     "macOS": {
       "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1MDMxM0U4RThGMTM1QkIKUldTN05mSG82Qk1EeGZib05wNC92MUdEN2RhZUtJejA0M28yZ1ZHS2M2RWhkRmlrVksrWWdXbnMK",
+      "endpoints": [
+        "https://github.com/Panther114/Prismatic/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

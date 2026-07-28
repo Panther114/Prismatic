@@ -12,6 +12,8 @@ import {LibraryView} from "./components/LibraryView";
 import {PersistentPlayer} from "./components/PersistentPlayer";
 import {QueueDrawer} from "./components/QueueDrawer";
 import {CustomSelect} from "./components/CustomSelect";
+import {UpdateDialog} from "./components/UpdateDialog";
+import {UpdateSettingsCard} from "./components/UpdateSettingsCard";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -36,6 +38,7 @@ import {
 import type {Playlist, RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
 import type {LibraryMode, LibrarySort} from "./types";
 import {setCompactPlayer} from "./lib/compactPlayer";
+import {appUpdater} from "./lib/appUpdater";
 
 const ACTIVE_STATUSES = new Set(["queued", "analyzing", "rendering"]);
 
@@ -95,6 +98,7 @@ export default function App() {
   const [watchBusy, setWatchBusy] = useState(false);
   const [musicDirectory, setMusicDirectory] = useState("");
   const [exportSize, setExportSize] = useState<{width: number; height: number} | null>(null);
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<null | {
     mode: "simple";
     title: string;
@@ -275,6 +279,13 @@ export default function App() {
   useEffect(() => {
     refresh().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setLoading(false));
   }, [refresh]);
+
+  // Desktop auto-update: quiet background check (never installs without the update UI).
+  useEffect(() => {
+    if (!isTauri) return;
+    appUpdater.scheduleStartupCheck();
+    return () => appUpdater.dispose();
+  }, []);
 
   // Hidden pages pause visual/UI work only. Audio output must remain alive.
   useEffect(() => {
@@ -1509,6 +1520,7 @@ export default function App() {
                 </ul>
               </section>
             )}
+            <UpdateSettingsCard onOpenDialog={() => setUpdateDialogOpen(true)} />
             {cloudMode && (
               <p className="save-hint mono" style={{marginTop: "1rem"}}>
                 Cloud mode: audio stays in your browser. Nothing is uploaded for rendering.
@@ -1705,6 +1717,11 @@ export default function App() {
       /> : null}
 
       {error && <button className="error-toast" onClick={() => setError("")}><span>{error}</span><X size={16} /></button>}
+
+      <UpdateDialog
+        forceOpen={updateDialogOpen}
+        onClose={() => setUpdateDialogOpen(false)}
+      />
 
       {confirmDialog && (
         <div className="confirm-overlay" role="presentation" onClick={() => setConfirmDialog(null)}>

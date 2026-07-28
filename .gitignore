@@ -41,6 +41,10 @@ hyperframes/
 .env
 .env.*
 !.env.example
+*.key
+*.key.pub
+!*.key.pub.example
+src-tauri/.keys/
 
 # Logs & OS
 *.log

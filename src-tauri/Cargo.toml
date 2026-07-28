@@ -1,6 +1,6 @@
 [package]
 name = "prismatic"
-version = "2.1.1"
+version = "2.1.2"
 description = "A lightweight cinematic music player and visual exporter"
 authors = ["Prismatic"]
 edition = "2021"
@@ -25,6 +25,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
@@ -34,6 +35,9 @@ lofty = "0.22"
 time = { version = "0.3", features = ["formatting"] }
 symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 notify = "8"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
 
 [profile.release]
 codegen-units = 1

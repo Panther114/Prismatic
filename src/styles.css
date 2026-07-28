@@ -365,6 +365,108 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .confirm-ok.soft:hover { filter: brightness(1.12); }
 .confirm-ok.danger { background: linear-gradient(100deg, #8b1e3a, #d63a4a 60%, #ff6a4a); }
 .confirm-ok.danger:hover { filter: brightness(1.06); }
+
+/* —— Software update UI —— */
+.update-overlay { z-index: 50; }
+.update-dialog { width: min(440px, 100%); }
+.update-dialog-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.update-dialog-title h2 { min-width: 0; }
+.update-dialog-badge {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 6px;
+  background: linear-gradient(145deg, rgba(19, 184, 255, .18), rgba(112, 71, 255, .22));
+  color: #9ad9ff;
+  border: 1px solid rgba(19, 184, 255, .22);
+}
+.update-version-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px !important;
+  font-size: 13px !important;
+  color: #c9ced6 !important;
+}
+.update-version-line strong { color: #f3f0e8; font-weight: 600; }
+.update-arrow { color: #6a7382; }
+.update-notes {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #252b36;
+  background: #0a0f16;
+  max-height: 180px;
+  overflow: auto;
+}
+.update-notes strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #8e96a5;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.update-notes pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #c5cbd6;
+}
+.update-progress {
+  height: 6px;
+  margin: 4px 0 8px;
+  border-radius: 99px;
+  background: #151b25;
+  overflow: hidden;
+  border: 1px solid #252b36;
+}
+.update-progress-bar {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #13b8ff, #7047ff 55%, #f12cbf);
+  transition: width .18s ease;
+}
+.update-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: #7a8290;
+  font-size: 10px;
+}
+.update-checking {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+.update-error { color: #ffb0b8 !important; }
+.update-dialog .confirm-ok,
+.update-dialog .confirm-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.update-settings-card { margin-top: 14px; }
+.update-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.update-settings-actions .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .spin { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes vinyl-spin { to { rotate: 360deg; } }
