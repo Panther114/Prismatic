@@ -1,17 +1,17 @@
-# Prismatic 2.1.5
+# Prismatic 2.1.6
 
-## Share UI
+## Fix: Share “Failed to fetch”
 
-- **Share dialog opens immediately** when you click Share on a playlist.
-- Shows live progress: packing tracks, waking the share server, uploading.
-- On success, shows the **4-digit code large and selectable**, with **Copy code**.
-- On failure, shows the error inside the same dialog (not only a corner toast).
+Desktop share was packing tracks with `fetch(asset://…)` which **WebView CSP blocks** — so share failed before reaching Railway.
 
-## Notes
+- Read track bytes through a **Rust command** (`read_track_bytes`) instead of webview fetch.
+- Allow `https://prismatic.up.railway.app` and asset hosts in CSP `connect-src`.
+- Clearer errors when the share server is unreachable / still cold-starting.
 
-- Cloud remains **share-only** at `https://prismatic.up.railway.app` (enable Railway **Serverless** for idle RAM ≈ 0).
-- Auto-update from GitHub Releases is unchanged.
+## Share UI (2.1.5)
+
+Immediate share dialog with progress, large code, and copy button.
 
 ## Upgrade
 
-Installing 2.1.5 preserves `Music/Prismatic` library data.
+Install 2.1.6 over any previous build; library data is preserved.

@@ -991,6 +991,29 @@ fn decode_waveform(path: &Path, duration: f64) -> Result<Vec<f32>, String> {
     Ok(peaks)
 }
 
+/// Read raw audio bytes for playlist-share packing (avoids webview CSP fetch of asset://).
+#[tauri::command]
+fn read_track_bytes(paths: State<LibraryPaths>, id: String) -> Result<Vec<u8>, String> {
+    let track = find_track(&paths, &id)?;
+    let path = Path::new(&track.media_path);
+    if !path.is_file() {
+        return Err(format!("Audio file missing: {}", track.file_name));
+    }
+    if !is_audio(path) {
+        return Err("Not an audio file".into());
+    }
+    // Bound size so a bad path cannot allocate multi-GB into IPC.
+    let meta = fs::metadata(path).map_err(display_err)?;
+    const MAX: u64 = 120 * 1024 * 1024;
+    if meta.len() > MAX {
+        return Err(format!(
+            "Track “{}” is too large to share (max 120 MB per file).",
+            track.title
+        ));
+    }
+    fs::read(path).map_err(display_err)
+}
+
 #[tauri::command]
 fn waveform(paths: State<LibraryPaths>, id: String) -> Result<Vec<f32>, String> {
     let cache_directory = paths.state_directory.join("waveforms");
@@ -1051,6 +1074,7 @@ pub fn run() {
             player_prefs,
             save_player_prefs,
             waveform,
+            read_track_bytes,
             output_directory,
         ])
         .run(tauri::generate_context!())

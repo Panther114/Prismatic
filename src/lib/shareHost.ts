@@ -57,16 +57,19 @@ export async function wakeShareHost(
   options: {onProgress?: (message: string) => void; attempts?: number} = {},
 ): Promise<void> {
   const base = baseUrl.replace(/\/$/, "");
-  const attempts = options.attempts ?? 6;
+  if (!base) return;
+  const attempts = options.attempts ?? 8;
   options.onProgress?.("Waking share server…");
+  let lastError: unknown;
 
   for (let i = 0; i < attempts; i += 1) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20_000);
+      const timer = setTimeout(() => controller.abort(), 25_000);
       const response = await fetch(`${base}/api/health`, {
         method: "GET",
         cache: "no-store",
+        mode: "cors",
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -74,24 +77,24 @@ export async function wakeShareHost(
         options.onProgress?.("Share server ready.");
         return;
       }
+      lastError = new Error(`Share host health failed (${response.status}).`);
       if (!isColdStartFailure(null, response.status) && response.status < 500) {
-        // 4xx means host is up but path wrong — stop spinning.
-        throw new Error(`Share host health failed (${response.status}).`);
+        throw lastError;
       }
     } catch (error) {
-      if (i === attempts - 1) {
-        // Last try: let the real upload attempt surface a clearer error.
-        options.onProgress?.("Share server still starting — continuing…");
-        return;
-      }
-      if (!isColdStartFailure(error)) {
-        options.onProgress?.("Share server still starting — continuing…");
-        return;
+      lastError = error;
+      if (!isColdStartFailure(error) && i === attempts - 1) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Cannot reach share server at ${base}. ${detail}. Check internet / Railway Serverless wake.`,
+        );
       }
     }
     options.onProgress?.(`Waking share server… (${i + 2}/${attempts})`);
-    await sleep(1200 + i * 800);
+    await sleep(1500 + i * 900);
   }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError || "timeout");
+  throw new Error(`Share server did not wake at ${base}: ${detail}`);
 }
 
 /**

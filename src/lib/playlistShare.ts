@@ -4,6 +4,21 @@ import {clientLibrary} from "./clientLibrary";
 import {idbGetTrackAudio} from "./clientIdb";
 import {playlistStore} from "./playlists";
 
+const EXT_MIME: Record<string, string> = {
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  m4a: "audio/mp4",
+  aac: "audio/aac",
+  ogg: "audio/ogg",
+  opus: "audio/ogg",
+};
+
+function mimeForFileName(fileName: string) {
+  const ext = fileName.split(".").pop()?.toLowerCase() || "";
+  return EXT_MIME[ext] || "application/octet-stream";
+}
+
 export const SHARE_MAX_TRACKS = 25;
 export const SHARE_MAX_DURATION_SEC = 100 * 60;
 
@@ -78,13 +93,31 @@ async function blobForTrack(track: Track): Promise<{blob: Blob; fileName: string
     throw new Error(`Could not read “${track.title}” from browser storage.`);
   }
 
+  // Desktop: read via Rust (CSP blocks fetch of asset:// / asset.localhost → "Failed to fetch").
+  if (isTauri) {
+    try {
+      const {invoke} = await import("@tauri-apps/api/core");
+      const raw = await invoke<number[] | Uint8Array>("read_track_bytes", {id: track.id});
+      const u8 = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
+      const contentType = mimeForFileName(track.fileName);
+      return {
+        blob: new Blob([u8], {type: contentType}),
+        fileName: track.fileName,
+        contentType,
+      };
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(`Could not read “${track.title}”: ${message}`);
+    }
+  }
+
   const response = await fetch(track.mediaUrl);
   if (!response.ok) throw new Error(`Could not read “${track.title}”.`);
   const blob = await response.blob();
   return {
     blob,
     fileName: track.fileName,
-    contentType: blob.type || "audio/mpeg",
+    contentType: blob.type || mimeForFileName(track.fileName),
   };
 }
 
