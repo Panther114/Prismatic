@@ -132,34 +132,42 @@ export async function createPlaylistShare(
   const limits = validateShareLimits(tracks);
   if (!limits.ok) throw new Error(limits.error);
 
-  // Desktop: native HTTP + disk reads (WebView fetch to Railway is unreliable / CSP-blocked).
+  // Desktop: native HTTP on a background thread (keeps share dialog responsive).
   if (isTauri) {
-    onProgress?.("Waking share server & packing tracks…", 0.05);
     const {invoke} = await import("@tauri-apps/api/core");
+    const {listen} = await import("@tauri-apps/api/event");
     const {getConfiguredShareBase} = await import("./shareHost");
-    onProgress?.("Uploading to share server…", 0.35);
-    const result = await invoke<{
-      code: string;
-      expiresAt: string;
-      trackCount: number;
-      totalDuration: number;
-      name: string;
-    }>("share_create_playlist", {
-      baseUrl: getConfiguredShareBase(),
-      name: playlist.name,
-      trackIds: tracks.map((t) => t.id),
+    onProgress?.("Starting share…", 0.02);
+    const unlisten = await listen<{message?: string}>("share-progress", (event) => {
+      const message = event.payload?.message;
+      if (message) onProgress?.(message, 0.4);
     });
-    onProgress?.("Done", 1);
-    if (!result?.code || String(result.code).length !== 4) {
-      throw new Error("Share host returned an invalid code.");
+    try {
+      const result = await invoke<{
+        code: string;
+        expiresAt: string;
+        trackCount: number;
+        totalDuration: number;
+        name: string;
+      }>("share_create_playlist", {
+        baseUrl: getConfiguredShareBase(),
+        name: playlist.name,
+        trackIds: tracks.map((t) => t.id),
+      });
+      onProgress?.("Done", 1);
+      if (!result?.code || String(result.code).length !== 4) {
+        throw new Error("Share host returned an invalid code.");
+      }
+      return {
+        code: result.code,
+        expiresAt: result.expiresAt,
+        trackCount: result.trackCount,
+        totalDuration: result.totalDuration,
+        name: result.name,
+      };
+    } finally {
+      unlisten();
     }
-    return {
-      code: result.code,
-      expiresAt: result.expiresAt,
-      trackCount: result.trackCount,
-      totalDuration: result.totalDuration,
-      name: result.name,
-    };
   }
 
   const form = new FormData();
@@ -214,12 +222,21 @@ export async function redeemPlaylistShare(
 
   if (isTauri) {
     const {invoke} = await import("@tauri-apps/api/core");
+    const {listen} = await import("@tauri-apps/api/event");
     const {getConfiguredShareBase} = await import("./shareHost");
-    options.onProgress?.("Waking share server…", 0.04);
-    manifest = await invoke<Manifest>("share_get_manifest", {
-      baseUrl: getConfiguredShareBase(),
-      code: normalized,
+    const unlisten = await listen<{message?: string}>("share-progress", (event) => {
+      const message = event.payload?.message;
+      if (message) options.onProgress?.(message, 0.06);
     });
+    try {
+      options.onProgress?.("Waking share server…", 0.04);
+      manifest = await invoke<Manifest>("share_get_manifest", {
+        baseUrl: getConfiguredShareBase(),
+        code: normalized,
+      });
+    } finally {
+      unlisten();
+    }
   } else {
     manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
   }

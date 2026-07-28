@@ -1,6 +1,6 @@
 {
   "name": "prismatic",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "private": true,
   "author": "Prismatic",
   "description": "Prismatic — cinematic music visualizer & desktop player. Playlist share API is serverless-friendly on Railway.",
@@ -22,7 +22,10 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "pnpm test && pnpm check && tauri build --bundles nsis",
+    "tauri:build:ci": "tauri build --bundles nsis",
     "dist:win": "pnpm tauri:build && node scripts/verify-tauri-installer.mjs",
+    "dist:win:ci": "pnpm exec tauri build --bundles nsis && node scripts/verify-tauri-installer.mjs",
+    "dist:win:fast": "pnpm build && cross-env CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 CARGO_PROFILE_RELEASE_OPT_LEVEL=2 tauri build --bundles nsis",
     "prepare:sample": "tsx scripts/prepare-sample.ts",
     "render:sample": "tsx scripts/render-sample.ts",
     "verify:installer": "node scripts/verify-tauri-installer.mjs",

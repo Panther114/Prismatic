@@ -1,15 +1,15 @@
-# Prismatic 2.1.7
+# Prismatic 2.1.8
 
-## Fix: Share stuck on “cold start — retry…”
+## Fixes
 
-Desktop was calling the Railway share API with **WebView `fetch`**, which keeps failing (`Failed to fetch` / endless cold-start retries) even when the server is healthy.
+1. **Share no longer freezes the app** — packing/upload runs on a **background thread** with live progress events (`share-progress`). The share dialog keeps updating instead of going non-responsive during “Uploading…”.
+2. **Edit/create playlist Save bar** — dialogs sit **above** the bottom player and leave bottom padding so **Save / Cancel** are never covered.
+3. **Faster release builds** — CI no longer double-runs tests + full `pnpm check`; Rust uses **thin LTO** (was full LTO).
 
-**Desktop share now uses native HTTP (Rust `reqwest`)**:
+## Share reliability
 
-- Wake, upload, manifest lookup, and download all run outside the WebView
-- Tracks are read from disk in Rust and multipart-uploaded directly
-- Retries still handle Railway Serverless cold boots
+Desktop share still uses **native Rust HTTP** to Railway (not WebView fetch), with cold-start wake + retries.
 
 ## Upgrade
 
-Install **2.1.7**. Library data is preserved. Prefer this over 2.1.5/2.1.6 for share.
+Install 2.1.8. Library under `Music/Prismatic` is preserved.

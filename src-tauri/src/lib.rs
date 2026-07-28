@@ -21,7 +21,7 @@ use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
     formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::{DirEntry, WalkDir};
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -1032,19 +1032,34 @@ fn share_http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(display_err)
 }
 
+fn emit_share_progress(app: Option<&AppHandle>, message: &str) {
+    if let Some(app) = app {
+        let _ = app.emit("share-progress", serde_json::json!({ "message": message }));
+    }
+}
+
 /// Wake Railway Serverless host (retries on cold boot / connection errors).
-#[tauri::command]
-fn share_wake(base_url: String) -> Result<(), String> {
-    let base = normalize_share_base(&base_url);
+fn share_wake_inner(app: Option<&AppHandle>, base_url: &str) -> Result<(), String> {
+    let base = normalize_share_base(base_url);
     if base.is_empty() {
         return Err("Share host URL is empty".into());
     }
     let client = share_http_client()?;
     let health = format!("{base}/api/health");
     let mut last = String::from("no response");
+    emit_share_progress(app, "Waking share server…");
     for attempt in 0..12 {
+        if attempt > 0 {
+            emit_share_progress(
+                app,
+                &format!("Waking share server… (try {}/12)", attempt + 1),
+            );
+        }
         match client.get(&health).send() {
-            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status().is_success() => {
+                emit_share_progress(app, "Share server ready.");
+                return Ok(());
+            }
             Ok(response) => {
                 last = format!("HTTP {}", response.status().as_u16());
                 let code = response.status().as_u16();
@@ -1061,6 +1076,14 @@ fn share_wake(base_url: String) -> Result<(), String> {
     Err(format!(
         "Share server did not wake at {base} after several tries ({last}). Is Railway Serverless still deploying?"
     ))
+}
+
+/// Non-blocking command wrapper — keeps the UI thread free during cold start.
+#[tauri::command]
+async fn share_wake(app: AppHandle, base_url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || share_wake_inner(Some(&app), &base_url))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[derive(Serialize)]
@@ -1087,9 +1110,9 @@ struct ShareTrackMetaOut {
 }
 
 /// Pack library tracks and POST multipart share package via native HTTP (not WebView).
-#[tauri::command]
-fn share_create_playlist(
-    paths: State<LibraryPaths>,
+fn share_create_playlist_inner(
+    app: Option<&AppHandle>,
+    paths: &LibraryPaths,
     base_url: String,
     name: String,
     track_ids: Vec<String>,
@@ -1103,10 +1126,11 @@ fn share_create_playlist(
         ));
     }
 
+    emit_share_progress(app, "Resolving playlist tracks…");
     let mut tracks = Vec::with_capacity(track_ids.len());
     let mut total_duration = 0.0_f64;
     for id in &track_ids {
-        let track = find_track(&paths, id)?;
+        let track = find_track(paths, id)?;
         let path = Path::new(&track.media_path);
         if !path.is_file() {
             return Err(format!("Audio file missing: {}", track.file_name));
@@ -1128,7 +1152,7 @@ fn share_create_playlist(
         return Err("Shared playlists must be under 100 minutes total.".into());
     }
 
-    share_wake(base_url.clone())?;
+    share_wake_inner(app, &base_url)?;
 
     let base = normalize_share_base(&base_url);
     let client = share_http_client()?;
@@ -1141,7 +1165,16 @@ fn share_create_playlist(
 
     let mut meta: Vec<ShareTrackMetaOut> = Vec::with_capacity(tracks.len());
     let mut file_parts: Vec<(String, String, Vec<u8>)> = Vec::with_capacity(tracks.len());
-    for track in &tracks {
+    for (index, track) in tracks.iter().enumerate() {
+        emit_share_progress(
+            app,
+            &format!(
+                "Reading track {}/{}: {}",
+                index + 1,
+                tracks.len(),
+                track.title
+            ),
+        );
         let path = Path::new(&track.media_path);
         let bytes = fs::read(path).map_err(display_err)?;
         let ext = path
@@ -1175,6 +1208,12 @@ fn share_create_playlist(
 
     let mut last_err = String::new();
     for attempt in 0..6 {
+        let upload_status = if attempt == 0 {
+            format!("Uploading {} tracks to share server…", tracks.len())
+        } else {
+            format!("Upload retry {}/6…", attempt + 1)
+        };
+        emit_share_progress(app, &upload_status);
         let mut form = reqwest::blocking::multipart::Form::new()
             .text("name", playlist_name.clone())
             .text("tracks", meta_json.clone());
@@ -1205,6 +1244,7 @@ fn share_create_playlist(
                     if code.len() != 4 {
                         return Err("Share host returned an invalid code.".into());
                     }
+                    emit_share_progress(app, "Share code ready.");
                     return Ok(ShareCreateResult {
                         code,
                         expires_at: value
@@ -1251,12 +1291,33 @@ fn share_create_playlist(
     Err(format!("Share upload failed after retries: {last_err}"))
 }
 
+/// Runs share packing/upload off the UI thread so the share dialog stays responsive.
 #[tauri::command]
-fn share_get_manifest(base_url: String, code: String) -> Result<serde_json::Value, String> {
-    share_wake(base_url.clone())?;
+async fn share_create_playlist(
+    app: AppHandle,
+    paths: State<'_, LibraryPaths>,
+    base_url: String,
+    name: String,
+    track_ids: Vec<String>,
+) -> Result<ShareCreateResult, String> {
+    let paths = paths.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        share_create_playlist_inner(Some(&app), &paths, base_url, name, track_ids)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn share_get_manifest_inner(
+    app: Option<&AppHandle>,
+    base_url: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    share_wake_inner(app, &base_url)?;
     let base = normalize_share_base(&base_url);
     let client = share_http_client()?;
     let url = format!("{base}/api/playlist-share/{}", code.trim());
+    emit_share_progress(app, "Loading shared playlist…");
     let mut last = String::new();
     for attempt in 0..6 {
         match client.get(&url).send() {
@@ -1287,12 +1348,25 @@ fn share_get_manifest(base_url: String, code: String) -> Result<serde_json::Valu
 }
 
 #[tauri::command]
-fn share_download_track(
+async fn share_get_manifest(
+    app: AppHandle,
+    base_url: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        share_get_manifest_inner(Some(&app), base_url, code)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn share_download_track_inner(
+    app: Option<&AppHandle>,
     base_url: String,
     code: String,
     index: u32,
 ) -> Result<Vec<u8>, String> {
-    share_wake(base_url.clone())?;
+    share_wake_inner(app, &base_url)?;
     let base = normalize_share_base(&base_url);
     let client = share_http_client()?;
     let url = format!(
@@ -1300,6 +1374,7 @@ fn share_download_track(
         code.trim(),
         index
     );
+    emit_share_progress(app, &format!("Downloading track {}…", index + 1));
     let mut last = String::new();
     for attempt in 0..6 {
         match client.get(&url).send() {
@@ -1319,6 +1394,20 @@ fn share_download_track(
         thread::sleep(Duration::from_millis(1200 + attempt as u64 * 800));
     }
     Err(format!("Download failed after retries: {last}"))
+}
+
+#[tauri::command]
+async fn share_download_track(
+    app: AppHandle,
+    base_url: String,
+    code: String,
+    index: u32,
+) -> Result<Vec<u8>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        share_download_track_inner(Some(&app), base_url, code, index)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

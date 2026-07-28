@@ -13,9 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Updater signatures (minisign). Required when createUpdaterArtifacts is true.
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  # Faster Rust release: thin LTO is set in Cargo.toml; keep incremental off for CI cleanliness.
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   windows:
@@ -42,6 +43,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: release-win
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -57,17 +59,18 @@ jobs:
             throw "TAURI_SIGNING_PRIVATE_KEY secret is missing (required for updater signatures)"
           }
 
-      - name: Run web and server checks
-        run: pnpm check
-
-      - name: Run frontend tests
+      # One test pass only — do not re-run via tauri:build (was doubling ~minutes).
+      - name: Frontend tests
         run: pnpm test
 
-      - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Typecheck + frontend bundle (for Tauri)
+        run: pnpm typecheck && pnpm build
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release
 
       - name: Build and verify Windows installer
-        run: pnpm dist:win
+        run: pnpm dist:win:ci
 
       - name: Assert updater signature exists
         shell: pwsh
@@ -114,6 +117,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: release-mac
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -130,14 +134,14 @@ jobs:
             exit 1
           fi
 
-      - name: Run web and server checks
-        run: pnpm check
-
-      - name: Run frontend tests
+      - name: Frontend tests
         run: pnpm test
 
-      - name: Run Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Typecheck + frontend bundle
+        run: pnpm typecheck && pnpm build
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release
 
       - name: Build macOS app bundles
         run: pnpm tauri build --bundles app,dmg
@@ -153,7 +157,6 @@ jobs:
               shasum -a 256 "$f" | tee "$f.sha256"
             fi
           done
-          # Updater payload + signature (required)
           tars=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
           if [ ${#tars[@]} -eq 0 ]; then
             echo "Missing macOS updater archive (*.app.tar.gz)" >&2
@@ -171,15 +174,12 @@ jobs:
             fi
             echo "OK $(basename "$tar") + sig ($chars bytes)"
           done
-          # Optional convenience zip of .app for manual download
           for app in src-tauri/target/release/bundle/macos/*.app; do
             if [ -d "$app" ]; then
               zip -qry "${app}.zip" "$app"
               shasum -a 256 "${app}.zip" | tee "${app}.zip.sha256"
             fi
           done
-          ls -la src-tauri/target/release/bundle/dmg || true
-          ls -la src-tauri/target/release/bundle/macos || true
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -239,11 +239,9 @@ jobs:
             --windows-x64-sig "$win_sig"
           )
 
-          # Prefer Apple Silicon updater archive (macos-latest is arm64).
           mac_tar=$(find artifacts/macos -type f -name '*.app.tar.gz' ! -name '*.sig' | head -n1 || true)
           mac_sig=$(find artifacts/macos -type f -name '*.app.tar.gz.sig' | head -n1 || true)
           if [ -n "$mac_tar" ] && [ -n "$mac_sig" ]; then
-            # Tauri macOS runners produce aarch64 on macos-latest.
             args+=(--darwin-aarch64 "$mac_tar" --darwin-aarch64-sig "$mac_sig")
           fi
 

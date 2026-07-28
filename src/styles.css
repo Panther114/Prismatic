@@ -230,8 +230,19 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .playlist-row-actions.dense { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .secondary-button.compact { height: 30px; padding: 0 10px; font-size: 10px; gap: 5px; }
 
-.playlist-edit-overlay { z-index: 40; }
-.playlist-edit-dialog { width: min(1840px, 96vw); max-height: min(88vh, 720px); display: flex; flex-direction: column; }
+/* Above persistent player (z-index 30) so Save/Cancel are never covered. */
+.playlist-edit-overlay {
+  z-index: 110;
+  padding: 12px 12px 96px !important;
+  align-items: center;
+  box-sizing: border-box;
+}
+.playlist-edit-dialog {
+  width: min(1840px, 96vw);
+  max-height: min(calc(100vh - 110px), 780px);
+  display: flex;
+  flex-direction: column;
+}
 .playlist-edit-name { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; color: #9ba1ac; font-size: 11px; }
 .playlist-edit-name input { height: 36px; padding: 0 11px; border: 1px solid #3b424d; border-radius: 2px; background: #0b0f16; color: #e2e0da; }
 .playlist-edit-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; flex: 1; margin-bottom: 12px; }
@@ -324,10 +335,11 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .confirm-overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: 110;
   display: grid;
   place-items: center;
-  padding: 20px;
+  padding: 20px 20px 96px;
+  box-sizing: border-box;
   background: rgba(3, 5, 10, .72);
   backdrop-filter: blur(6px);
 }
@@ -713,7 +725,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 @keyframes skeleton { to { background-position: -220% 0; } }
 
 .persistent-player {
-  z-index: 40;
+  /* Below modal overlays (110+) so edit/share dialogs own the bottom of the screen. */
+  z-index: 30;
   grid-column: 1 / -1;
   grid-row: 2;
   display: grid;
@@ -1082,12 +1095,20 @@ html.compact-player-mode .persistent-player { grid-column: 1; grid-row: 1; heigh
 .playlist-table-row .track-copy small { font-size: 9px; }
 .playlist-row-actions.dense { flex-wrap: nowrap; gap: 1px; }
 .playlist-row-actions .icon-btn { width: 27px; height: 27px; }
-.playlist-edit-overlay { padding: 7px; }
+.playlist-edit-overlay { padding: 10px 10px 96px; }
 .playlist-edit-dialog {
   width: min(1600px, 99vw);
-  height: min(94vh, 900px);
-  max-height: 94vh;
+  height: min(calc(100vh - 110px), 860px);
+  max-height: calc(100vh - 110px);
   padding: 14px;
+  overflow: hidden;
+}
+.playlist-edit-dialog .confirm-actions {
+  flex-shrink: 0;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid #1c2430;
+  background: linear-gradient(160deg, #121821 0%, #0b1018 100%);
 }
 .playlist-edit-name { margin-bottom: 7px; }
 .playlist-edit-name input { height: 32px; }
