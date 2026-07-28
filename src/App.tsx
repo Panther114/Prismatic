@@ -14,6 +14,7 @@ import {QueueDrawer} from "./components/QueueDrawer";
 import {CustomSelect} from "./components/CustomSelect";
 import {UpdateDialog} from "./components/UpdateDialog";
 import {UpdateSettingsCard} from "./components/UpdateSettingsCard";
+import {SharePlaylistDialog, type ShareDialogState} from "./components/SharePlaylistDialog";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -102,7 +103,7 @@ export default function App() {
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareStatus, setShareStatus] = useState("");
-  const [shareCodeDialog, setShareCodeDialog] = useState<null | {code: string; name: string; expiresAt: string}>(null);
+  const [shareDialog, setShareDialog] = useState<ShareDialogState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<null | {
     mode: "simple";
     title: string;
@@ -1213,16 +1214,41 @@ export default function App() {
   };
 
   const sharePlaylist = async (playlist: Playlist) => {
+    // Open UI immediately so the user always sees progress / code / errors.
     setShareBusy(true);
-    setShareStatus("");
+    setShareStatus("Preparing…");
     setError("");
+    setShareDialog({
+      phase: "working",
+      playlistName: playlist.name,
+      status: "Preparing…",
+    });
     try {
-      const result = await createPlaylistShare(playlist, tracks, (message) => setShareStatus(message));
-      setShareCodeDialog({code: result.code, name: result.name, expiresAt: result.expiresAt});
+      const result = await createPlaylistShare(playlist, tracks, (message) => {
+        setShareStatus(message);
+        setShareDialog((current) =>
+          current && current.phase === "working"
+            ? {...current, status: message}
+            : current,
+        );
+      });
       setShareStatus(`Share code ${result.code} ready (expires in 24h).`);
+      setShareDialog({
+        phase: "done",
+        playlistName: result.name || playlist.name,
+        code: result.code,
+        expiresAt: result.expiresAt,
+        status: "Done",
+      });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
       setShareStatus("");
+      setShareDialog({
+        phase: "error",
+        playlistName: playlist.name,
+        error: message,
+      });
     } finally {
       setShareBusy(false);
     }
@@ -1828,45 +1854,15 @@ export default function App() {
         </div>
       )}
 
-      {shareCodeDialog && (
-        <div className="confirm-overlay" role="presentation" onClick={() => setShareCodeDialog(null)}>
-          <div
-            className="confirm-dialog playlist-share-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="share-code-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="confirm-dialog-head">
-              <h2 id="share-code-title">Playlist shared</h2>
-              <button type="button" className="confirm-close" onClick={() => setShareCodeDialog(null)} aria-label="Close">
-                <X size={16} />
-              </button>
-            </div>
-            <p>
-              “{shareCodeDialog.name}” is available for 24 hours. Another client can open Playlists → Import code and enter:
-            </p>
-            <p className="playlist-share-code" aria-label="Share code">{shareCodeDialog.code}</p>
-            <p className="save-hint">
-              Expires {new Date(shareCodeDialog.expiresAt).toLocaleString()}. Original audio quality is preserved; tracks download one at a time.
-            </p>
-            <div className="confirm-actions">
-              <button
-                type="button"
-                className="confirm-cancel"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(shareCodeDialog.code).catch(() => undefined);
-                }}
-              >
-                Copy code
-              </button>
-              <button type="button" className="confirm-ok" autoFocus onClick={() => setShareCodeDialog(null)}>
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {shareDialog ? (
+        <SharePlaylistDialog
+          state={shareDialog}
+          onClose={() => {
+            if (shareDialog.phase === "working") return;
+            setShareDialog(null);
+          }}
+        />
+      ) : null}
     </main>
   );
 }

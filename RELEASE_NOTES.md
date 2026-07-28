@@ -1,21 +1,17 @@
-# Prismatic 2.1.4
+# Prismatic 2.1.5
 
-## Railway: share-only + cold start
+## Share UI
 
-- **Website removed from Railway** — the cloud service no longer serves the SPA. It is a **playlist-share API only** (`/api/health`, `/api/playlist-share/*`).
-- **Desktop is the product** — library, playback, studio, and auto-update stay on the desktop app (GitHub Releases).
-- **Cold-start friendly client** — share/import **wakes** `https://prismatic.up.railway.app` (health ping + retries on 502/network) before upload/download so Railway **Serverless** can sleep when idle.
-- **Disk-backed share** (from 2.1.3) + **single concurrent upload** + **128 MB heap cap** kept.
+- **Share dialog opens immediately** when you click Share on a playlist.
+- Shows live progress: packing tracks, waking the share server, uploading.
+- On success, shows the **4-digit code large and selectable**, with **Copy code**.
+- On failure, shows the error inside the same dialog (not only a corner toast).
 
-### You should enable (one toggle, huge idle savings)
+## Notes
 
-Railway → service → **Settings → Serverless → Enable** (App Sleeping).  
-Until that is on, the container stays warm and still uses background RAM.
-
-## Auto-update
-
-Unchanged: signed updates from GitHub Releases. Install 2.1.4 once; later versions update in-app.
+- Cloud remains **share-only** at `https://prismatic.up.railway.app` (enable Railway **Serverless** for idle RAM ≈ 0).
+- Auto-update from GitHub Releases is unchanged.
 
 ## Upgrade
 
-Library data under `Music/Prismatic` is preserved.
+Installing 2.1.5 preserves `Music/Prismatic` library data.

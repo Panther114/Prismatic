@@ -994,17 +994,75 @@ html.compact-player-mode .persistent-player { grid-column: 1; grid-row: 1; heigh
 .playlist-view .utility-heading p { margin: 0; font-size: 10px; }
 .playlist-heading-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
 .playlist-share-status { margin: 0 0 8px; color: #9aa5b5; font-size: 11px; }
-.playlist-share-error { margin: 0 0 10px; color: #ff9ea6; font-size: 12px; }
+.playlist-share-error { margin: 0 0 10px; color: #ff9ea6; font-size: 12px; line-height: 1.45; }
+.playlist-share-overlay { z-index: 120; }
+.playlist-share-dialog { width: min(440px, 100%); }
+.playlist-share-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px !important;
+  color: #c5ccd6 !important;
+  font-size: 13px !important;
+}
+.playlist-share-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f0f2f5;
+  font-weight: 560;
+}
+.playlist-share-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px 14px;
+  border: 1px solid #2a3444;
+  border-radius: 8px;
+  background: #0c121b;
+  color: #d7dde6;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.playlist-share-progress .spin { flex: 0 0 auto; color: #7eb6ff; }
+.playlist-share-code-block {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 12px;
+  padding: 16px 14px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: radial-gradient(120% 120% at 50% 0%, #182233 0%, #0c121b 70%);
+}
 .playlist-share-code {
-  margin: 8px 0 12px !important;
+  margin: 0 !important;
   text-align: center;
   font-family: "JetBrains Mono", monospace;
-  font-size: 42px;
+  font-size: 48px;
   font-weight: 600;
-  letter-spacing: .28em;
-  color: #f3f5f8;
+  letter-spacing: .32em;
+  color: #f7f9fc;
+  user-select: all;
 }
-.playlist-share-dialog { width: min(420px, 100%); }
+.playlist-share-copy-main {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #3d6ea8;
+  border-radius: 6px;
+  background: #1a3a5c;
+  color: #e8f1ff;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.playlist-share-copy-main:hover { background: #214a73; border-color: #5b8fd4; }
+.confirm-actions .confirm-cancel,
+.confirm-actions .confirm-ok { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .playlist-edit-duration {
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
