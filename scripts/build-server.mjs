@@ -1,10 +1,9 @@
 /**
- * Bundle the Express server for Electron into a single ESM file.
+ * Bundle Express servers:
+ * - dist-server/index.mjs  — full local/desktop (library + share + optional Vite)
+ * - dist-server/cloud.mjs  — Railway slim (health + SPA + disk share only)
  *
- * IMPORTANT: Do NOT leave npm packages external. When dist-server is
- * asarUnpacked, Node cannot resolve packages that only live inside app.asar
- * (e.g. "Cannot find package 'music-metadata'").
- *
+ * IMPORTANT: Do NOT leave npm packages external for the full desktop bundle.
  * Only native / optional binaries stay external.
  */
 import path from "node:path";
@@ -18,37 +17,14 @@ const viteDir = path.dirname(require.resolve("vite/package.json"));
 const esbuildPath = require.resolve("esbuild", {paths: [viteDir, root]});
 const esbuild = await import(pathToFileURL(esbuildPath).href);
 
-const outfile = path.join(root, "dist-server", "index.mjs");
-await fs.mkdir(path.dirname(outfile), {recursive: true});
+const outDir = path.join(root, "dist-server");
+await fs.mkdir(outDir, {recursive: true});
 
-// Sourcemaps only for local debug builds — desktop packages strip them in stage-desktop.
 const withSourceMap = process.env.PRISMATIC_SERVER_SOURCEMAP === "1";
+const minify = process.env.PRISMATIC_SERVER_MINIFY !== "0";
 
-await esbuild.build({
-  entryPoints: [path.join(root, "server", "index.ts")],
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node20",
-  outfile,
-  // Bundle express, music-metadata, multer, etc. into one file.
-  // Desktop / production start run this file with zero node_modules.
-  packages: "bundle",
-  external: [
-    "electron",
-    // Dev-only HMR middleware (never taken when NODE_ENV=production).
-    "vite",
-    // Server-side video path is disabled; never ship native canvas in the desktop app.
-    "@napi-rs/canvas",
-    "@napi-rs/canvas-*",
-    "fsevents",
-  ],
-  // Tree-shake production path; keep dynamic import("vite") external for `pnpm dev`.
-  sourcemap: withSourceMap,
-  minify: process.env.PRISMATIC_SERVER_MINIFY !== "0",
-  logLevel: "info",
-  banner: {
-    js: `
+const banner = {
+  js: `
 import { createRequire as __prismaticCreateRequire } from 'node:module';
 import { fileURLToPath as __prismaticFileURLToPath } from 'node:url';
 import { dirname as __prismaticDirname } from 'node:path';
@@ -56,17 +32,68 @@ const require = __prismaticCreateRequire(import.meta.url);
 const __filename = __prismaticFileURLToPath(import.meta.url);
 const __dirname = __prismaticDirname(__filename);
 `.trim(),
-  },
+};
+
+const common = {
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node20",
+  packages: "bundle",
+  sourcemap: withSourceMap,
+  minify,
+  logLevel: "info",
+  banner,
+};
+
+// --- Full server (desktop / local production) ---
+const fullOut = path.join(outDir, "index.mjs");
+await esbuild.build({
+  ...common,
+  entryPoints: [path.join(root, "server", "index.ts")],
+  outfile: fullOut,
+  external: [
+    "electron",
+    "vite",
+    "@napi-rs/canvas",
+    "@napi-rs/canvas-*",
+    "fsevents",
+  ],
 });
 
-// Sanity: music-metadata must not remain as a bare external import
-const code = await fs.readFile(outfile, "utf8");
-if (/from\s+["']music-metadata["']/.test(code) || /require\(["']music-metadata["']\)/.test(code)) {
-  console.error("FAIL: dist-server still imports music-metadata externally");
+const fullCode = await fs.readFile(fullOut, "utf8");
+if (/from\s+["']music-metadata["']/.test(fullCode) || /require\(["']music-metadata["']\)/.test(fullCode)) {
+  console.error("FAIL: dist-server/index.mjs still imports music-metadata externally");
   process.exit(1);
 }
-if (!code.includes("parseFile") && !code.includes("music-metadata") && !code.includes("parseBlob")) {
-  console.warn("WARN: bundle may not include music-metadata symbols (check manually)");
+if (!fullCode.includes("parseFile") && !fullCode.includes("music-metadata") && !fullCode.includes("parseBlob")) {
+  console.warn("WARN: full bundle may not include music-metadata symbols (check manually)");
 }
+console.log(`Server bundle (full)  → ${fullOut} (${(fullCode.length / 1024).toFixed(0)} KB)`);
 
-console.log(`Server bundle → ${outfile} (${(code.length / 1024).toFixed(0)} KB)`);
+// --- Slim cloud (Railway) ---
+const cloudOut = path.join(outDir, "cloud.mjs");
+await esbuild.build({
+  ...common,
+  entryPoints: [path.join(root, "server", "cloud.ts")],
+  outfile: cloudOut,
+  external: [
+    "electron",
+    "vite",
+    "@napi-rs/canvas",
+    "@napi-rs/canvas-*",
+    "fsevents",
+    // Library stack must never ship in the cloud binary.
+    "music-metadata",
+  ],
+});
+
+const cloudCode = await fs.readFile(cloudOut, "utf8");
+if (cloudCode.includes("MusicLibrary") || cloudCode.includes("music-metadata") || cloudCode.includes("parseFile")) {
+  console.error("FAIL: dist-server/cloud.mjs contains library/metadata stack");
+  process.exit(1);
+}
+if (!cloudCode.includes("playlist-share") && !cloudCode.includes("PlaylistShare")) {
+  console.warn("WARN: cloud bundle may be missing playlist-share routes");
+}
+console.log(`Server bundle (cloud) → ${cloudOut} (${(cloudCode.length / 1024).toFixed(0)} KB)`);

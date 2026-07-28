@@ -1,6 +1,6 @@
 /**
  * Temporary playlist share packages (4-digit codes, 24h TTL).
- * Designed for Railway: disk under tmp, hard limits, sequential clients, auto-purge.
+ * Disk-backed only — never holds full packages in RAM.
  */
 import {promises as fs, createReadStream, existsSync} from "node:fs";
 import path from "node:path";
@@ -14,6 +14,8 @@ export const SHARE_TTL_MS = 24 * 60 * 60 * 1000;
 export const SHARE_MAX_PACKAGE_BYTES = 700 * 1024 * 1024;
 export const SHARE_MAX_TRACK_BYTES = 120 * 1024 * 1024;
 export const SHARE_MAX_ACTIVE = 40;
+/** One in-flight share upload at a time keeps peak RSS flat under multi-user load. */
+export const SHARE_MAX_CONCURRENT_UPLOADS = 1;
 
 export type ShareTrackMeta = {
   index: number;
@@ -39,6 +41,19 @@ export type ShareManifest = {
   tracks: ShareTrackMeta[];
 };
 
+export type ShareTrackInput = {
+  fileName: string;
+  title: string;
+  artist: string;
+  album: string;
+  duration: number;
+  bitrate: number | null;
+  format: string;
+  contentType: string;
+  /** Absolute path to a temp file on disk (multer diskStorage). Moved into the share dir. */
+  tempPath: string;
+};
+
 type IndexEntry = {
   code: string;
   dir: string;
@@ -53,6 +68,16 @@ function nowIso() {
 function safeFileName(name: string, fallback: string) {
   const base = path.basename(name || fallback).replace(/[^\p{L}\p{N}._ -]+/gu, "-") || fallback;
   return base.slice(0, 180);
+}
+
+/** Prefer rename (no extra copy); fall back to copy+unlink across volumes. */
+async function moveFile(src: string, dest: string) {
+  try {
+    await fs.rename(src, dest);
+  } catch {
+    await fs.copyFile(src, dest);
+    await fs.unlink(src).catch(() => undefined);
+  }
 }
 
 export class PlaylistShareStore {
@@ -134,20 +159,11 @@ export class PlaylistShareStore {
     return {totalDuration, totalBytes};
   }
 
-  async create(input: {
-    name: string;
-    tracks: Array<{
-      fileName: string;
-      title: string;
-      artist: string;
-      album: string;
-      duration: number;
-      bitrate: number | null;
-      format: string;
-      contentType: string;
-      buffer: Buffer;
-    }>;
-  }): Promise<ShareManifest> {
+  /**
+   * Build a share from temp files on disk. Tracks are moved one-by-one so peak
+   * RAM stays near constant regardless of playlist size.
+   */
+  async createFromTempFiles(input: {name: string; tracks: ShareTrackInput[]}): Promise<ShareManifest> {
     await this.ensureReady();
     await this.purgeExpired();
 
@@ -155,15 +171,19 @@ export class PlaylistShareStore {
       throw new Error("Share capacity reached on this host. Try again later.");
     }
 
-    const sizes = input.tracks.map((t) => ({duration: t.duration, size: t.buffer.byteLength}));
-    const {totalDuration, totalBytes} = this.validateLimits(sizes);
-
+    const sized: Array<ShareTrackInput & {size: number}> = [];
     for (const track of input.tracks) {
-      if (track.buffer.byteLength > SHARE_MAX_TRACK_BYTES) {
+      const stat = await fs.stat(track.tempPath).catch(() => null);
+      if (!stat?.isFile() || !stat.size) {
+        throw new Error(`Track “${track.title || track.fileName}” was empty or missing.`);
+      }
+      if (stat.size > SHARE_MAX_TRACK_BYTES) {
         throw new Error(`Track “${track.title || track.fileName}” exceeds the per-file size limit.`);
       }
-      if (!track.buffer.byteLength) throw new Error("A track file was empty.");
+      sized.push({...track, size: stat.size});
     }
+
+    const {totalDuration, totalBytes} = this.validateLimits(sized);
 
     const code = this.allocateCode();
     const dir = path.join(this.root, code);
@@ -174,11 +194,13 @@ export class PlaylistShareStore {
     const tracks: ShareTrackMeta[] = [];
 
     try {
-      for (let index = 0; index < input.tracks.length; index += 1) {
-        const track = input.tracks[index];
+      for (let index = 0; index < sized.length; index += 1) {
+        const track = sized[index];
         const fileName = safeFileName(track.fileName, `track-${index + 1}.mp3`);
         const storedName = `track-${String(index).padStart(2, "0")}${path.extname(fileName) || ".mp3"}`;
-        await fs.writeFile(path.join(dir, storedName), track.buffer);
+        const dest = path.join(dir, storedName);
+        // Sequential move: only one file is in flight; temp is freed immediately.
+        await moveFile(track.tempPath, dest);
         tracks.push({
           index,
           fileName,
@@ -188,7 +210,7 @@ export class PlaylistShareStore {
           duration: Number(track.duration) || 0,
           bitrate: track.bitrate == null ? null : Math.round(Number(track.bitrate)),
           format: (track.format || path.extname(fileName).slice(1) || "audio").toUpperCase(),
-          size: track.buffer.byteLength,
+          size: track.size,
           contentType: track.contentType || "application/octet-stream",
         });
       }

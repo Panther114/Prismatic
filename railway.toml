@@ -1,6 +1,6 @@
 # Prismatic — one-click Railway deploy
 # Video export runs entirely in the user's browser.
-# The service only serves the SPA + a tiny health API (low RAM).
+# Runtime: slim cloud.mjs (SPA + health + disk playlist-share). No library stack.
 
 [build]
 builder = "NIXPACKS"
@@ -8,11 +8,15 @@ builder = "NIXPACKS"
 buildCommand = "pnpm build && pnpm build:server"
 
 [deploy]
-startCommand = "pnpm start"
+# Single instance; heap capped so spikes OOM the request instead of multi-GB RSS.
+# PRISMATIC_CLOUD=1 forces cloud stubs even if env is misconfigured.
+startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
+# Keep one replica (set the same in Railway dashboard if UI overrides this).
+numReplicas = 1
 
 # Kill Vite→Caddy SPA mode; we run Node/Express (see nixpacks.toml).
 # Also set this in Railway dashboard Variables if the plan still shows caddy.
