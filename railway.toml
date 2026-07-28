@@ -1,22 +1,14 @@
-# Prismatic — share-only Railway service (no website).
-# Desktop app talks to https://prismatic.up.railway.app for playlist codes.
-# Enable Serverless (App Sleeping) in the Railway dashboard so idle RAM ≈ 0.
+# Prismatic — optional health-only Railway service (no website, no share).
+# Playlist transfer is local zip export/import in the desktop app.
 
 [build]
 builder = "NIXPACKS"
-# Server bundle only — do not build or ship the SPA.
 buildCommand = "pnpm build:server"
 
 [deploy]
-# Share API only. Heap capped; PRISMATIC_CLOUD forces cloud stubs if anything misloads.
-startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs"
-# Longer timeout: first health after cold start can take several seconds.
+startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=128 dist-server/cloud.mjs"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 120
+healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 numReplicas = 1
-
-# REQUIRED for cold-start / idle RAM savings (dashboard):
-# Service → Settings → Serverless → Enable
-# (formerly "App Sleeping"). Without this, the container stays warm 24/7.

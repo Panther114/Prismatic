@@ -1,9 +1,9 @@
 {
   "name": "prismatic",
-  "version": "2.1.10",
+  "version": "2.1.11",
   "private": true,
   "author": "Prismatic",
-  "description": "Prismatic — cinematic music visualizer & desktop player. Playlist share API is serverless-friendly on Railway.",
+  "description": "Prismatic — cinematic music visualizer & desktop player. Transfer playlists with zip export/import.",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "engines": {

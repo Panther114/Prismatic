@@ -1,5 +1,0 @@
-{
-  "baseUrl": "https://prismatic.up.railway.app",
-  "role": "playlist-share-only",
-  "notes": "Desktop builds use this origin for 4-digit playlist codes. Enable Railway Serverless (App Sleeping) for cold-start idle RAM."
-}

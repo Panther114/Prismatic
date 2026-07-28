@@ -93,7 +93,7 @@ if (cloudCode.includes("MusicLibrary") || cloudCode.includes("music-metadata") |
   console.error("FAIL: dist-server/cloud.mjs contains library/metadata stack");
   process.exit(1);
 }
-if (!cloudCode.includes("playlist-share") && !cloudCode.includes("PlaylistShare")) {
-  console.warn("WARN: cloud bundle may be missing playlist-share routes");
+if (!cloudCode.includes("/api/health") && !cloudCode.includes("health")) {
+  console.warn("WARN: cloud bundle may be missing health endpoint");
 }
 console.log(`Server bundle (cloud) → ${cloudOut} (${(cloudCode.length / 1024).toFixed(0)} KB)`);

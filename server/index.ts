@@ -29,10 +29,6 @@ const server = createHttpServer(app);
 
 app.use(express.json({limit: "256kb"}));
 
-// Disk-backed playlist share (same routes as slim cloud entry).
-const {mountShareRoutes} = await import("./shareRoutes.js");
-await mountShareRoutes(app);
-
 app.get("/api/health", async (_request, response) => {
   const distIndex = path.join(root, "dist", "index.html");
   let distOk = false;

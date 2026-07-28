@@ -14,12 +14,11 @@ import {QueueDrawer} from "./components/QueueDrawer";
 import {CustomSelect} from "./components/CustomSelect";
 import {UpdateDialog} from "./components/UpdateDialog";
 import {UpdateSettingsCard} from "./components/UpdateSettingsCard";
-import {SharePlaylistDialog, type ShareDialogState} from "./components/SharePlaylistDialog";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
 import {playlistStore} from "./lib/playlists";
-import {createPlaylistShare, redeemPlaylistShare} from "./lib/playlistShare";
+import {exportPlaylistZip, importPlaylistZip} from "./lib/playlistZip";
 import {loadPlayerPrefs, loadPlayerPrefsLocal, savePlayerPrefs} from "./lib/playerPrefs";
 import {
   createQueue,
@@ -101,9 +100,8 @@ export default function App() {
   const [musicDirectory, setMusicDirectory] = useState("");
   const [exportSize, setExportSize] = useState<{width: number; height: number} | null>(null);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  const [shareBusy, setShareBusy] = useState(false);
-  const [shareStatus, setShareStatus] = useState("");
-  const [shareDialog, setShareDialog] = useState<ShareDialogState | null>(null);
+  const [zipBusy, setZipBusy] = useState(false);
+  const [zipStatus, setZipStatus] = useState("");
   const [confirmDialog, setConfirmDialog] = useState<null | {
     mode: "simple";
     title: string;
@@ -1213,96 +1211,48 @@ export default function App() {
     playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
   };
 
-  const sharePlaylist = async (playlist: Playlist) => {
-    // Open UI immediately so the user always sees progress / code / errors.
-    setShareBusy(true);
-    setShareStatus("Preparing…");
+  const exportZipPlaylist = async (playlist: Playlist) => {
+    setZipBusy(true);
+    setZipStatus("Preparing zip…");
     setError("");
-    setShareDialog({
-      phase: "working",
-      playlistName: playlist.name,
-      status: "Preparing…",
-      progress: 0.02,
-    });
     try {
-      const result = await createPlaylistShare(playlist, tracks, (message, ratio, debug) => {
-        setShareStatus(message);
-        setShareDialog((current) =>
-          current && current.phase === "working"
-            ? {
-              ...current,
-              status: message,
-              progress: ratio,
-              debug: debug != null
-                ? JSON.stringify(debug).slice(0, 480)
-                : current.debug,
-            }
-            : current,
-        );
-      });
-      setShareStatus(`Share code ${result.code} ready (expires in 24h).`);
-      setShareDialog({
-        phase: "done",
-        playlistName: result.name || playlist.name,
-        code: result.code,
-        expiresAt: result.expiresAt,
-        status: "Done",
-        progress: 1,
-      });
+      const result = await exportPlaylistZip(playlist, tracks, (message) => setZipStatus(message));
+      setZipStatus(`Saved zip: ${result.path}`);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      setShareStatus("");
-      setShareDialog((current) => ({
-        phase: "error",
-        playlistName: playlist.name,
-        error: message,
-        status: current?.phase === "working" ? current.status : undefined,
-        progress: current?.progress,
-        debug: current?.debug,
-      }));
+      if (!/cancel/i.test(message)) setError(message);
+      setZipStatus("");
     } finally {
-      setShareBusy(false);
+      setZipBusy(false);
     }
   };
 
-  const redeemShareCode = async (code: string) => {
-    setShareBusy(true);
-    setShareStatus("");
+  const importZipPlaylist = async () => {
+    setZipBusy(true);
+    setZipStatus("Importing zip…");
     setError("");
     try {
-      const result = await redeemPlaylistShare(code, {
-        cloudMode: cloudModeRef.current,
-        onProgress: (message) => setShareStatus(message),
+      const result = await importPlaylistZip({
+        onProgress: (message) => setZipStatus(message),
         refreshTracks: async () => {
-          if (cloudModeRef.current) {
-            await clientLibrary.hydrate().catch(() => undefined);
-            const merged = mergeTracks([], true);
-            setTracks(merged);
-            return merged;
-          }
           const serverTracks = await api.tracks();
-          const merged = mergeTracks(serverTracks, false);
+          const merged = mergeTracks(serverTracks, cloudModeRef.current);
           setTracks(merged);
           return merged;
         },
       });
       setPlaylists(playlistStore.list());
-      if (cloudModeRef.current) {
-        const merged = mergeTracks([], true);
-        setTracks(merged);
-      } else {
-        const serverTracks = await api.tracks().catch(() => tracks);
-        setTracks(mergeTracks(serverTracks, false));
-      }
-      setShareStatus(
+      const serverTracks = await api.tracks().catch(() => tracks);
+      setTracks(mergeTracks(serverTracks, cloudModeRef.current));
+      setZipStatus(
         `Imported “${result.playlist.name}” (${result.imported} new track${result.imported === 1 ? "" : "s"}${result.skipped ? `, ${result.skipped} skipped` : ""}).`,
       );
     } catch (cause) {
-      setShareStatus("");
-      throw cause instanceof Error ? cause : new Error(String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!/cancel/i.test(message)) setError(message);
+      setZipStatus("");
     } finally {
-      setShareBusy(false);
+      setZipBusy(false);
     }
   };
 
@@ -1498,10 +1448,10 @@ export default function App() {
             }}
             onPlay={playPlaylist}
             onExport={(pl) => void startPlaylistExport(pl)}
-            onShare={(pl) => void sharePlaylist(pl)}
-            onRedeemShare={redeemShareCode}
-            shareBusy={shareBusy}
-            shareStatus={shareStatus}
+            onExportZip={isTauri ? (pl) => void exportZipPlaylist(pl) : undefined}
+            onImportZip={isTauri ? () => void importZipPlaylist() : undefined}
+            zipBusy={zipBusy}
+            zipStatus={zipStatus}
             exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
           />
         )}
@@ -1866,15 +1816,6 @@ export default function App() {
         </div>
       )}
 
-      {shareDialog ? (
-        <SharePlaylistDialog
-          state={shareDialog}
-          onClose={() => {
-            if (shareDialog.phase === "working") return;
-            setShareDialog(null);
-          }}
-        />
-      ) : null}
     </main>
   );
 }

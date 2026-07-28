@@ -14,8 +14,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
@@ -677,7 +676,7 @@ struct ImportBytesFile {
     bytes: Vec<u8>,
 }
 
-/// Write raw audio bytes into the managed library (playlist-share redeem on desktop).
+/// Write raw audio bytes into the managed library.
 #[tauri::command]
 fn import_audio_bytes(
     paths: State<LibraryPaths>,
@@ -992,674 +991,175 @@ fn decode_waveform(path: &Path, duration: f64) -> Result<Vec<f32>, String> {
     Ok(peaks)
 }
 
-/// Read raw audio bytes for playlist-share packing (avoids webview CSP fetch of asset://).
-#[tauri::command]
-fn read_track_bytes(paths: State<LibraryPaths>, id: String) -> Result<Vec<u8>, String> {
-    let track = find_track(&paths, &id)?;
-    let path = Path::new(&track.media_path);
-    if !path.is_file() {
-        return Err(format!("Audio file missing: {}", track.file_name));
-    }
-    if !is_audio(path) {
-        return Err("Not an audio file".into());
-    }
-    // Bound size so a bad path cannot allocate multi-GB into IPC.
-    let meta = fs::metadata(path).map_err(display_err)?;
-    const MAX: u64 = 120 * 1024 * 1024;
-    if meta.len() > MAX {
-        return Err(format!(
-            "Track “{}” is too large to share (max 120 MB per file).",
-            track.title
-        ));
-    }
-    fs::read(path).map_err(display_err)
-}
-
-const SHARE_MAX_TRACKS: usize = 25;
-const SHARE_MAX_DURATION_SEC: f64 = 100.0 * 60.0;
-const SHARE_MAX_TRACK_BYTES: u64 = 120 * 1024 * 1024;
-
-fn normalize_share_base(base: &str) -> String {
-    base.trim().trim_end_matches('/').to_owned()
-}
-
-fn share_http_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(600))
-        .connect_timeout(Duration::from_secs(45))
-        .user_agent("Prismatic-Desktop/2.1")
-        .build()
-        .map_err(display_err)
-}
-
-fn emit_share_progress(app: Option<&AppHandle>, message: &str) {
-    emit_share_progress_ex(app, message, None, None);
-}
-
-fn emit_share_progress_ex(
-    app: Option<&AppHandle>,
-    message: &str,
-    progress: Option<f64>,
-    debug: Option<serde_json::Value>,
-) {
+fn emit_zip_progress(app: Option<&AppHandle>, message: &str, progress: Option<f64>) {
     if let Some(app) = app {
         let mut payload = serde_json::json!({ "message": message });
         if let Some(p) = progress {
             payload["progress"] = serde_json::json!(p.clamp(0.0, 1.0));
         }
-        if let Some(d) = debug {
-            payload["debug"] = d;
-        }
-        let _ = app.emit("share-progress", payload);
+        let _ = app.emit("zip-progress", payload);
     }
 }
 
-/// Wake Railway Serverless host (retries on cold boot / connection errors).
-fn share_wake_inner(app: Option<&AppHandle>, base_url: &str) -> Result<(), String> {
-    let base = normalize_share_base(base_url);
-    if base.is_empty() {
-        return Err("Share host URL is empty".into());
+fn safe_zip_entry_name(file_name: &str, index: usize) -> String {
+    let base = Path::new(file_name)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("track");
+    let cleaned = base.replace(['/', '\\', ':'], "-");
+    if cleaned.is_empty() {
+        format!("track-{:02}.mp3", index + 1)
+    } else {
+        cleaned
     }
-    let client = share_http_client()?;
-    let health = format!("{base}/api/health");
-    let mut last = String::from("no response");
-    emit_share_progress(app, "Waking share server…");
-    for attempt in 0..12 {
-        if attempt > 0 {
-            emit_share_progress(
-                app,
-                &format!("Waking share server… (try {}/12)", attempt + 1),
-            );
-        }
-        match client.get(&health).send() {
-            Ok(response) if response.status().is_success() => {
-                emit_share_progress(app, "Share server ready.");
-                return Ok(());
-            }
-            Ok(response) => {
-                last = format!("HTTP {}", response.status().as_u16());
-                let code = response.status().as_u16();
-                if code < 500 && code != 502 && code != 503 && code != 504 {
-                    return Err(format!("Share host health failed ({code})"));
-                }
-            }
-            Err(error) => {
-                last = error.to_string();
-            }
-        }
-        thread::sleep(Duration::from_millis(1200 + attempt as u64 * 700));
-    }
-    Err(format!(
-        "Share server did not wake at {base} after several tries ({last}). Is Railway Serverless still deploying?"
-    ))
 }
 
-/// Non-blocking command wrapper — keeps the UI thread free during cold start.
-#[tauri::command]
-async fn share_wake(app: AppHandle, base_url: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || share_wake_inner(Some(&app), &base_url))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShareCreateResult {
-    code: String,
-    expires_at: String,
-    track_count: u32,
-    total_duration: f64,
-    name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShareTrackMetaOut {
-    file_name: String,
-    title: String,
-    artist: String,
-    album: String,
-    duration: f64,
-    bitrate: Option<u32>,
-    format: String,
-    content_type: String,
-}
-
-/// Per-track share upload (session → N PUTs → complete) — each request stays under Railway's 5‑min body limit.
-fn share_create_playlist_inner(
+fn playlist_zip_inner(
     app: Option<&AppHandle>,
     paths: &LibraryPaths,
-    base_url: String,
-    name: String,
     track_ids: Vec<String>,
-) -> Result<ShareCreateResult, String> {
+    dest_path: String,
+) -> Result<String, String> {
     if track_ids.is_empty() {
         return Err("Playlist is empty.".into());
     }
-    if track_ids.len() > SHARE_MAX_TRACKS {
-        return Err(format!(
-            "Shared playlists are limited to {SHARE_MAX_TRACKS} tracks."
-        ));
-    }
-
-    let started = SystemTime::now();
-    emit_share_progress_ex(app, "Resolving playlist tracks…", Some(0.02), None);
+    emit_zip_progress(app, "Collecting tracks…", Some(0.02));
     let mut tracks = Vec::with_capacity(track_ids.len());
-    let mut total_duration = 0.0_f64;
-    let mut total_bytes = 0u64;
     for id in &track_ids {
         let track = find_track(paths, id)?;
-        let path = Path::new(&track.media_path);
-        if !path.is_file() {
+        if !Path::new(&track.media_path).is_file() {
             return Err(format!("Audio file missing: {}", track.file_name));
         }
-        let size = fs::metadata(path).map_err(display_err)?.len();
-        if size == 0 {
-            return Err(format!("Track “{}” is empty.", track.title));
-        }
-        if size > SHARE_MAX_TRACK_BYTES {
-            return Err(format!(
-                "Track “{}” exceeds the per-file size limit.",
-                track.title
-            ));
-        }
-        total_duration += track.duration;
-        total_bytes += size;
         tracks.push(track);
     }
-    if total_duration >= SHARE_MAX_DURATION_SEC {
-        return Err("Shared playlists must be under 100 minutes total.".into());
+
+    let dest = PathBuf::from(&dest_path);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(display_err)?;
     }
+    let file = File::create(&dest).map_err(display_err)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
 
-    share_wake_inner(app, &base_url)?;
-
-    let base = normalize_share_base(&base_url);
-    let client = share_http_client()?;
-
-    let playlist_name = if name.trim().is_empty() {
-        "Shared playlist".to_owned()
-    } else {
-        name.trim().to_owned()
-    };
-
-    let mut meta: Vec<ShareTrackMetaOut> = Vec::with_capacity(tracks.len());
-    for track in &tracks {
-        let path = Path::new(&track.media_path);
-        let ext = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("mp3")
-            .to_lowercase();
-        let content_type = match ext.as_str() {
-            "mp3" => "audio/mpeg",
-            "wav" => "audio/wav",
-            "flac" => "audio/flac",
-            "m4a" | "mp4" => "audio/mp4",
-            "aac" => "audio/aac",
-            "ogg" | "opus" => "audio/ogg",
-            _ => "application/octet-stream",
-        }
-        .to_owned();
-        meta.push(ShareTrackMetaOut {
-            file_name: track.file_name.clone(),
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
-            duration: track.duration,
-            bitrate: track.bitrate,
-            format: track.format.clone(),
-            content_type,
-        });
-    }
-
-    emit_share_progress_ex(
-        app,
-        "Creating share session…",
-        Some(0.06),
-        Some(serde_json::json!({
-            "phase": "session",
-            "tracks": tracks.len(),
-            "totalBytes": total_bytes,
-        })),
-    );
-    let session_body = serde_json::json!({
-        "name": playlist_name,
-        "tracks": meta,
-    });
-    let session_res = client
-        .post(format!("{base}/api/playlist-share/session"))
-        .json(&session_body)
-        .send()
-        .map_err(|e| format!("Share session request failed: {e}"))?;
-    let session_status = session_res.status();
-    let session_text = session_res.text().unwrap_or_default();
-    if !session_status.is_success() {
-        let err = serde_json::from_str::<serde_json::Value>(&session_text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_owned()))
-            .unwrap_or_else(|| format!("Share session failed ({})", session_status.as_u16()));
-        return Err(err);
-    }
-    let session: serde_json::Value =
-        serde_json::from_str(&session_text).map_err(display_err)?;
-    let code = session
-        .get("code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    if code.len() != 4 {
-        return Err("Share host returned an invalid session code.".into());
-    }
-    let expires_at = session
-        .get("expiresAt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-
-    let mut uploaded_bytes = 0u64;
+    let mut used_names = HashSet::new();
     for (index, track) in tracks.iter().enumerate() {
-        let path = Path::new(&track.media_path);
-        let size = fs::metadata(path).map_err(display_err)?.len();
-        let progress = 0.08 + (index as f64 / tracks.len().max(1) as f64) * 0.85;
-        let mb = size as f64 / (1024.0 * 1024.0);
-        emit_share_progress_ex(
+        emit_zip_progress(
             app,
-            &format!(
-                "Uploading {}/{}: {} ({:.1} MB)",
-                index + 1,
-                tracks.len(),
-                track.title,
-                mb
-            ),
-            Some(progress),
-            Some(serde_json::json!({
-                "phase": "track",
-                "index": index,
-                "of": tracks.len(),
-                "title": track.title,
-                "bytes": size,
-                "uploadedBytes": uploaded_bytes,
-                "totalBytes": total_bytes,
-                "code": code,
-                "elapsedMs": started.elapsed().map(|d| d.as_millis()).unwrap_or(0),
-            })),
+            &format!("Zipping {}/{}: {}", index + 1, tracks.len(), track.title),
+            Some(0.05 + (index as f64 / tracks.len().max(1) as f64) * 0.9),
         );
-
-        let mut last_err = String::new();
-        let mut ok = false;
-        for attempt in 0..3 {
-            let track_started = SystemTime::now();
-            let meta_patch = serde_json::json!({
-                "fileName": track.file_name,
-                "title": track.title,
-                "artist": track.artist,
-                "album": track.album,
-                "duration": track.duration,
-                "bitrate": track.bitrate,
-                "format": track.format,
-                "contentType": meta[index].content_type,
-            });
-            let part = reqwest::blocking::multipart::Part::file(path)
-                .map_err(display_err)?
-                .file_name(track.file_name.clone())
-                .mime_str(&meta[index].content_type)
-                .map_err(display_err)?;
-            let form = reqwest::blocking::multipart::Form::new()
-                .text("meta", meta_patch.to_string())
-                .part("audio", part);
-
-            match client
-                .put(format!("{base}/api/playlist-share/{code}/tracks/{index}"))
-                .multipart(form)
-                .send()
-            {
-                Ok(response) => {
-                    let status = response.status();
-                    let text = response.text().unwrap_or_default();
-                    if status.is_success() {
-                        let elapsed = track_started
-                            .elapsed()
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0);
-                        uploaded_bytes += size;
-                        emit_share_progress_ex(
-                            app,
-                            &format!(
-                                "Uploaded {}/{} ({elapsed} ms)",
-                                index + 1,
-                                tracks.len()
-                            ),
-                            Some(progress + 0.02),
-                            Some(serde_json::json!({
-                                "phase": "track-done",
-                                "index": index,
-                                "bytes": size,
-                                "elapsedMs": elapsed,
-                                "uploadedBytes": uploaded_bytes,
-                                "totalBytes": total_bytes,
-                            })),
-                        );
-                        ok = true;
-                        break;
-                    }
-                    last_err = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("error")
-                                .and_then(|e| e.as_str())
-                                .map(|s| s.to_owned())
-                        })
-                        .unwrap_or_else(|| format!("Track upload failed ({})", status.as_u16()));
-                    let code_n = status.as_u16();
-                    // Retry on 408/429/5xx (not deterministic 4xx validation errors)
-                    if code_n != 408
-                        && code_n != 429
-                        && code_n != 502
-                        && code_n != 503
-                        && code_n != 504
-                        && code_n < 500
-                    {
-                        let _ = client
-                            .delete(format!("{base}/api/playlist-share/{code}"))
-                            .send();
-                        return Err(last_err);
-                    }
-                }
-                Err(error) => {
-                    last_err = format!("{error}");
-                }
-            }
-            if attempt + 1 < 3 {
-                thread::sleep(Duration::from_millis(800 + attempt as u64 * 600));
-            }
+        let mut entry = safe_zip_entry_name(&track.file_name, index);
+        if used_names.contains(&entry) {
+            let stem = Path::new(&entry)
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .unwrap_or("track");
+            let ext = Path::new(&entry)
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("mp3");
+            entry = format!("{}-{}.{}", stem, index + 1, ext);
         }
-        if !ok {
-            let _ = client
-                .delete(format!("{base}/api/playlist-share/{code}"))
-                .send();
-            return Err(format!(
-                "Failed uploading “{}” after retries: {last_err}",
-                track.title
-            ));
-        }
+        used_names.insert(entry.clone());
+        zip.start_file(&entry, options).map_err(display_err)?;
+        let mut src = File::open(&track.media_path).map_err(display_err)?;
+        std::io::copy(&mut src, &mut zip).map_err(display_err)?;
     }
-
-    emit_share_progress_ex(app, "Finalizing share…", Some(0.96), None);
-    let complete_res = client
-        .post(format!("{base}/api/playlist-share/{code}/complete"))
-        .send()
-        .map_err(|e| format!("Finalize request failed: {e}"))?;
-    let complete_status = complete_res.status();
-    let complete_text = complete_res.text().unwrap_or_default();
-    if !complete_status.is_success() {
-        let err = serde_json::from_str::<serde_json::Value>(&complete_text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_owned()))
-            .unwrap_or_else(|| format!("Finalize failed ({})", complete_status.as_u16()));
-        return Err(err);
-    }
-    let complete: serde_json::Value =
-        serde_json::from_str(&complete_text).map_err(display_err)?;
-    let total_ms = started.elapsed().map(|d| d.as_millis()).unwrap_or(0);
-    emit_share_progress_ex(
-        app,
-        &format!("Share code ready ({total_ms} ms total)"),
-        Some(1.0),
-        Some(serde_json::json!({
-            "phase": "done",
-            "code": code,
-            "tracks": tracks.len(),
-            "totalBytes": total_bytes,
-            "elapsedMs": total_ms,
-        })),
-    );
-
-    Ok(ShareCreateResult {
-        code: complete
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&code)
-            .to_owned(),
-        expires_at: complete
-            .get("expiresAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&expires_at)
-            .to_owned(),
-        track_count: complete
-            .get("trackCount")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(tracks.len() as u64) as u32,
-        total_duration: complete
-            .get("totalDuration")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(total_duration),
-        name: complete
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&playlist_name)
-            .to_owned(),
-    })
+    zip.finish().map_err(display_err)?;
+    emit_zip_progress(app, "Zip complete.", Some(1.0));
+    Ok(dest.to_string_lossy().into_owned())
 }
 
-/// Runs share packing/upload off the UI thread so the share dialog stays responsive.
 #[tauri::command]
-async fn share_create_playlist(
+async fn export_playlist_zip(
     app: AppHandle,
     paths: State<'_, LibraryPaths>,
-    base_url: String,
-    name: String,
     track_ids: Vec<String>,
-) -> Result<ShareCreateResult, String> {
+    dest_path: String,
+) -> Result<String, String> {
     let paths = paths.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        share_create_playlist_inner(Some(&app), &paths, base_url, name, track_ids)
+        playlist_zip_inner(Some(&app), &paths, track_ids, dest_path)
     })
     .await
-    .map_err(|error| error.to_string())?
-}
-
-fn share_get_manifest_inner(
-    app: Option<&AppHandle>,
-    base_url: &str,
-    code: &str,
-    do_wake: bool,
-) -> Result<serde_json::Value, String> {
-    if do_wake {
-        share_wake_inner(app, base_url)?;
-    }
-    let base = normalize_share_base(base_url);
-    let client = share_http_client()?;
-    let url = format!("{base}/api/playlist-share/{}", code.trim());
-    emit_share_progress(app, "Loading shared playlist…");
-    let mut last = String::new();
-    for attempt in 0..4 {
-        match client.get(&url).send() {
-            Ok(response) => {
-                let status = response.status();
-                let text = response.text().unwrap_or_default();
-                if status.is_success() {
-                    return serde_json::from_str(&text).map_err(display_err);
-                }
-                last = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("error")
-                            .and_then(|e| e.as_str())
-                            .map(|s| s.to_owned())
-                    })
-                    .unwrap_or_else(|| format!("Share host error ({})", status.as_u16()));
-                let code_n = status.as_u16();
-                if code_n != 502 && code_n != 503 && code_n != 504 && code_n < 500 {
-                    return Err(last);
-                }
-            }
-            Err(error) => last = error.to_string(),
-        }
-        thread::sleep(Duration::from_millis(800 + attempt as u64 * 500));
-    }
-    Err(format!("Could not load share: {last}"))
-}
-
-#[tauri::command]
-async fn share_get_manifest(
-    app: AppHandle,
-    base_url: String,
-    code: String,
-) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        share_get_manifest_inner(Some(&app), &base_url, &code, true)
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-fn share_download_track_inner(
-    app: Option<&AppHandle>,
-    base_url: &str,
-    code: &str,
-    index: u32,
-    do_wake: bool,
-) -> Result<Vec<u8>, String> {
-    if do_wake {
-        share_wake_inner(app, base_url)?;
-    }
-    let base = normalize_share_base(base_url);
-    let client = share_http_client()?;
-    let url = format!(
-        "{base}/api/playlist-share/{}/tracks/{}",
-        code.trim(),
-        index
-    );
-    let mut last = String::new();
-    for attempt in 0..4 {
-        match client.get(&url).send() {
-            Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    return response.bytes().map(|b| b.to_vec()).map_err(display_err);
-                }
-                last = format!("HTTP {}", status.as_u16());
-                let code_n = status.as_u16();
-                if code_n != 502 && code_n != 503 && code_n != 504 && code_n < 500 {
-                    return Err(format!("Download failed ({code_n})"));
-                }
-            }
-            Err(error) => last = error.to_string(),
-        }
-        thread::sleep(Duration::from_millis(800 + attempt as u64 * 500));
-    }
-    Err(format!("Download failed after retries: {last}"))
-}
-
-/// `wake`: when false, skips host wake (caller already woke once for multi-track redeem).
-#[tauri::command]
-async fn share_download_track(
-    app: AppHandle,
-    base_url: String,
-    code: String,
-    index: u32,
-    wake: Option<bool>,
-) -> Result<Vec<u8>, String> {
-    let do_wake = wake.unwrap_or(true);
-    tauri::async_runtime::spawn_blocking(move || {
-        share_download_track_inner(Some(&app), &base_url, &code, index, do_wake)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ShareRedeemResult {
+struct ImportZipResult {
     name: String,
     track_ids: Vec<String>,
     imported: u32,
     skipped: u32,
 }
 
-/// Wake once, download all tracks straight into the library folder (no multi-MB IPC).
-fn share_redeem_to_library_inner(
+fn import_playlist_zip_inner(
     app: Option<&AppHandle>,
     paths: &LibraryPaths,
-    base_url: String,
-    code: String,
-) -> Result<ShareRedeemResult, String> {
-    let code = code.trim().to_owned();
-    if code.len() != 4 || !code.chars().all(|c| c.is_ascii_digit()) {
-        return Err("Enter a 4-digit share code.".into());
+    zip_path: String,
+) -> Result<ImportZipResult, String> {
+    let zip_path = PathBuf::from(zip_path);
+    if !zip_path.is_file() {
+        return Err("Zip file not found.".into());
     }
-
-    share_wake_inner(app, &base_url)?;
-    // Already awake — do not wake again for manifest or each track.
-    let manifest = share_get_manifest_inner(app, &base_url, &code, false)?;
-    let name = manifest
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Shared playlist")
+    let mut name = zip_path
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or("Imported playlist")
+        .trim()
         .to_owned();
-    let tracks = manifest
-        .get("tracks")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if tracks.is_empty() {
-        return Err("Shared playlist has no tracks.".into());
-    }
-    if tracks.len() > SHARE_MAX_TRACKS {
-        return Err(format!(
-            "Shared playlists are limited to {SHARE_MAX_TRACKS} tracks."
-        ));
+    if name.is_empty() {
+        name = "Imported playlist".to_owned();
     }
 
+    emit_zip_progress(app, "Reading zip…", Some(0.05));
+    let file = File::open(&zip_path).map_err(display_err)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(display_err)?;
     let mut imported_names = Vec::new();
-    let mut skipped = 0u32;
     let mut imported = 0u32;
+    let mut skipped = 0u32;
+    let total = archive.len().max(1);
 
-    for (i, row) in tracks.iter().enumerate() {
-        let index = row
-            .get("index")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(i as u64) as u32;
-        let file_name = row
-            .get("fileName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("track.mp3");
-        let title = row
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or(file_name);
-        emit_share_progress(
-            app,
-            &format!("Downloading {}/{}: {title}", i + 1, tracks.len()),
-        );
-        // Already woke once above — do not re-wake per track (was ~30s each).
-        let bytes = share_download_track_inner(app, &base_url, &code, index, false)?;
-        if bytes.is_empty() {
-            return Err(format!("Empty download for “{title}”."));
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(display_err)?;
+        if entry.is_dir() {
+            continue;
         }
-
-        let safe = Path::new(file_name)
+        let raw_name = entry.name().to_string();
+        let base = Path::new(&raw_name)
             .file_name()
             .and_then(|v| v.to_str())
-            .unwrap_or("track.mp3");
-        if !is_audio(Path::new(safe)) {
+            .unwrap_or("");
+        if base.is_empty() || base.starts_with('.') {
+            continue;
+        }
+        if !is_audio(Path::new(base)) {
             skipped += 1;
             continue;
         }
+        emit_zip_progress(
+            app,
+            &format!("Importing {}/{}: {}", i + 1, total, base),
+            Some(0.1 + (i as f64 / total as f64) * 0.75),
+        );
 
-        let mut destination = paths.music_directory.join(safe);
+        let mut destination = paths.music_directory.join(base);
         if destination.exists() {
+            let mut buf = Vec::new();
+            std::io::copy(&mut entry, &mut buf).map_err(display_err)?;
             let existing = fs::metadata(&destination).map_err(display_err)?.len();
-            if existing == bytes.len() as u64 {
-                imported_names.push(safe.to_owned());
+            if existing == buf.len() as u64 {
+                imported_names.push(base.to_owned());
                 skipped += 1;
                 continue;
             }
-            let stem = Path::new(safe)
+            let stem = Path::new(base)
                 .file_stem()
                 .and_then(|v| v.to_str())
                 .unwrap_or("audio");
-            let extension = Path::new(safe)
+            let extension = Path::new(base)
                 .extension()
                 .and_then(|v| v.to_str())
                 .unwrap_or("mp3");
@@ -1670,8 +1170,11 @@ fn share_redeem_to_library_inner(
             destination = paths
                 .music_directory
                 .join(format!("{stem}-{suffix:x}.{extension}"));
+            fs::write(&destination, &buf).map_err(display_err)?;
+        } else {
+            let mut out = File::create(&destination).map_err(display_err)?;
+            std::io::copy(&mut entry, &mut out).map_err(display_err)?;
         }
-        fs::write(&destination, &bytes).map_err(display_err)?;
         if let Some(written) = destination
             .file_name()
             .and_then(|v| v.to_str())
@@ -1684,10 +1187,8 @@ fn share_redeem_to_library_inner(
 
     unhide_imported_basenames(paths, &imported_names)?;
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    emit_share_progress(app, "Scanning library…");
+    emit_zip_progress(app, "Scanning library…", Some(0.92));
     let scanned = scan_tracks(paths)?;
-
-    // Preserve share order when matching by file name.
     let mut track_ids = Vec::new();
     for name in &imported_names {
         if let Some(track) = scanned.iter().find(|t| &t.file_name == name) {
@@ -1696,13 +1197,11 @@ fn share_redeem_to_library_inner(
             }
         }
     }
-
     if track_ids.is_empty() {
-        return Err("Tracks downloaded but none could be matched into the library.".into());
+        return Err("No supported audio files found in the zip.".into());
     }
-
-    emit_share_progress(app, "Redeem complete.");
-    Ok(ShareRedeemResult {
+    emit_zip_progress(app, "Import complete.", Some(1.0));
+    Ok(ImportZipResult {
         name,
         track_ids,
         imported,
@@ -1711,18 +1210,17 @@ fn share_redeem_to_library_inner(
 }
 
 #[tauri::command]
-async fn share_redeem_to_library(
+async fn import_playlist_zip(
     app: AppHandle,
     paths: State<'_, LibraryPaths>,
-    base_url: String,
-    code: String,
-) -> Result<ShareRedeemResult, String> {
+    zip_path: String,
+) -> Result<ImportZipResult, String> {
     let paths = paths.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        share_redeem_to_library_inner(Some(&app), &paths, base_url, code)
+        import_playlist_zip_inner(Some(&app), &paths, zip_path)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1785,12 +1283,8 @@ pub fn run() {
             player_prefs,
             save_player_prefs,
             waveform,
-            read_track_bytes,
-            share_wake,
-            share_create_playlist,
-            share_get_manifest,
-            share_download_track,
-            share_redeem_to_library,
+            export_playlist_zip,
+            import_playlist_zip,
             output_directory,
         ])
         .run(tauri::generate_context!())
