@@ -11,6 +11,26 @@ import {
 } from "./playbackQueue";
 
 describe("playback queue", () => {
+  it("shuffle without startId plays the first of the shuffled order (not always base[0])", () => {
+    const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    // Statistical: across many shuffles, base[0] should not always be current.
+    let firstIsA = 0;
+    for (let i = 0; i < 40; i += 1) {
+      const queue = createQueue(ids, {shuffle: true});
+      if (currentId(queue) === "a") firstIsA += 1;
+      expect(queue.order).toHaveLength(ids.length);
+      expect(new Set(queue.order)).toEqual(new Set(ids));
+      expect(queue.index).toBe(0);
+    }
+    expect(firstIsA).toBeLessThan(40);
+  });
+
+  it("shuffle with startId still opens on that track", () => {
+    const queue = createQueue(["a", "b", "c", "d"], {shuffle: true, startId: "c"});
+    expect(currentId(queue)).toBe("c");
+    expect(queue.order[0]).toBe("c");
+  });
+
   it("preserves the current track when items are reordered", () => {
     const queue = createQueue(["a", "b", "c"], {startId: "b"});
     const reordered = reorderQueue(queue, 2, 0);

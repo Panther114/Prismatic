@@ -669,6 +669,65 @@ fn import_paths(
     scan_tracks(&paths)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportBytesFile {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+/// Write raw audio bytes into the managed library (playlist-share redeem on desktop).
+#[tauri::command]
+fn import_audio_bytes(
+    paths: State<LibraryPaths>,
+    files: Vec<ImportBytesFile>,
+) -> Result<Vec<DesktopTrack>, String> {
+    let mut imported_names = Vec::new();
+    for file in files {
+        let safe = Path::new(&file.file_name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("track.mp3");
+        if !is_audio(Path::new(safe)) {
+            continue;
+        }
+        let mut destination = paths.music_directory.join(safe);
+        if destination.exists() {
+            let existing = fs::metadata(&destination).map_err(display_err)?.len();
+            if existing == file.bytes.len() as u64 {
+                imported_names.push(safe.to_owned());
+                continue;
+            }
+            let stem = Path::new(safe)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("audio");
+            let extension = Path::new(safe)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("mp3");
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            destination = paths
+                .music_directory
+                .join(format!("{stem}-{suffix:x}.{extension}"));
+        }
+        fs::write(&destination, &file.bytes).map_err(display_err)?;
+        if let Some(name) = destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(ToOwned::to_owned)
+        {
+            imported_names.push(name);
+        }
+    }
+    unhide_imported_basenames(&paths, &imported_names)?;
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    scan_tracks(&paths)
+}
+
 #[tauri::command]
 fn import_folder(
     paths: State<LibraryPaths>,
@@ -981,6 +1040,7 @@ pub fn run() {
             remove_track,
             clear_library,
             import_paths,
+            import_audio_bytes,
             import_folder,
             add_watch_folder,
             remove_watch_folder,

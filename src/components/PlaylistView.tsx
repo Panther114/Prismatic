@@ -1,9 +1,10 @@
 import {useEffect, useMemo, useState, type ComponentType, type DragEvent} from "react";
 import {
-  Check, Clapperboard, GripVertical, LoaderCircle, Pencil, Play, Plus, Shuffle, Trash2, X,
+  Check, Clapperboard, Download, GripVertical, LoaderCircle, Pencil, Play, Plus, Share2, Shuffle, Trash2, X,
 } from "lucide-react";
 import type {Playlist, Track} from "../types";
 import {PlaylistCover} from "./PlaylistCover";
+import {SHARE_MAX_DURATION_SEC, SHARE_MAX_TRACKS, validateShareLimits} from "../lib/playlistShare";
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds)) return "00:00";
@@ -24,6 +25,10 @@ export type PlaylistViewProps = {
   onUpdateTracks: (id: string, trackIds: string[]) => Promise<void>;
   onPlay: (playlist: Playlist, shuffle: boolean) => void;
   onExport?: (playlist: Playlist) => void;
+  onShare?: (playlist: Playlist) => void;
+  onRedeemShare?: (code: string) => Promise<void>;
+  shareBusy?: boolean;
+  shareStatus?: string;
   exporting?: boolean;
   busy?: boolean;
   createRequest?: number;
@@ -39,6 +44,10 @@ export function PlaylistView({
   onUpdateTracks,
   onPlay,
   onExport,
+  onShare,
+  onRedeemShare,
+  shareBusy,
+  shareStatus,
   exporting,
   busy,
   createRequest = 0,
@@ -49,6 +58,9 @@ export function PlaylistView({
   const [editIds, setEditIds] = useState<string[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [redeemOpen, setRedeemOpen] = useState(false);
+  const [redeemCode, setRedeemCode] = useState("");
+  const [redeemError, setRedeemError] = useState("");
   const byId = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
 
   const durationOf = (playlist: Playlist) =>
@@ -117,21 +129,51 @@ export function PlaylistView({
     setDragId(null);
   };
 
+  const shareDisabledReason = (playlist: Playlist) => {
+    const list = playlist.trackIds.map((id) => byId.get(id)).filter((t): t is Track => Boolean(t));
+    const check = validateShareLimits(list);
+    if (!check.ok) return check.error;
+    return "";
+  };
+
+  const submitRedeem = async () => {
+    if (!onRedeemShare) return;
+    setRedeemError("");
+    try {
+      await onRedeemShare(redeemCode.trim());
+      setRedeemOpen(false);
+      setRedeemCode("");
+    } catch (cause) {
+      setRedeemError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   return (
     <div className="utility-view playlist-view">
       <div className="utility-heading row">
         <div>
           <span>Playlists</span>
           <h1>Your sets.</h1>
-          <p>Play, shuffle, export, or edit a set.</p>
+          <p>Play, shuffle, share, export, or edit a set. Shares expire in 24h · max {SHARE_MAX_TRACKS} tracks · under {Math.floor(SHARE_MAX_DURATION_SEC / 60)} min.</p>
         </div>
-        <button type="button" className="secondary-button" disabled={busy} onClick={openCreate}>
-          <Plus size={14} />Create playlist
-        </button>
+        <div className="playlist-heading-actions">
+          {onRedeemShare ? (
+            <button type="button" className="secondary-button" disabled={busy || shareBusy} onClick={() => { setRedeemOpen(true); setRedeemError(""); }}>
+              <Download size={14} />Import code
+            </button>
+          ) : null}
+          <button type="button" className="secondary-button" disabled={busy} onClick={openCreate}>
+            <Plus size={14} />Create playlist
+          </button>
+        </div>
       </div>
 
+      {shareStatus ? <p className="playlist-share-status" role="status">{shareStatus}</p> : null}
+
       <div className="playlist-table custom-scroll">
-        {playlists.map((playlist) => (
+        {playlists.map((playlist) => {
+          const shareBlock = shareDisabledReason(playlist);
+          return (
           <div key={playlist.id} className="playlist-table-row">
             <PlaylistCover trackIds={playlist.trackIds} tracksById={byId} size={30} />
             <div className="track-copy">
@@ -145,6 +187,18 @@ export function PlaylistView({
               <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, true)} title="Shuffle" aria-label={`Shuffle ${playlist.name}`}>
                 <Shuffle size={13} />
               </button>
+              {onShare ? (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  disabled={!playlist.trackIds.length || shareBusy || Boolean(shareBlock)}
+                  onClick={() => onShare(playlist)}
+                  title={shareBlock || "Share (1-day code)"}
+                  aria-label={`Share ${playlist.name}`}
+                >
+                  {shareBusy ? <LoaderCircle className="spin" size={13} /> : <Share2 size={13} />}
+                </button>
+              ) : null}
               {onExport ? (
                 <button type="button" className="icon-btn" disabled={!playlist.trackIds.length || exporting} onClick={() => onExport(playlist)} title="Export" aria-label={`Export ${playlist.name}`}>
                   {exporting ? <LoaderCircle className="spin" size={13} /> : <Clapperboard size={13} />}
@@ -158,9 +212,49 @@ export function PlaylistView({
               </button>
             </div>
           </div>
-        ))}
+          );
+        })}
         {!playlists.length ? <p className="empty-library">No playlists yet. Create one and select its tracks.</p> : null}
       </div>
+
+      {redeemOpen ? (
+        <div className="confirm-overlay" role="presentation" onClick={() => !shareBusy && setRedeemOpen(false)}>
+          <div
+            className="confirm-dialog playlist-share-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="playlist-redeem-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-dialog-head">
+              <h2 id="playlist-redeem-title">Import shared playlist</h2>
+              <button type="button" className="confirm-close" disabled={shareBusy} onClick={() => setRedeemOpen(false)} aria-label="Close"><X size={16} /></button>
+            </div>
+            <p className="save-hint">Enter the 4-digit code. Tracks download one-by-one (original quality), join your library, and the playlist is forged automatically.</p>
+            <label className="playlist-edit-name">
+              Code
+              <input
+                value={redeemCode}
+                onChange={(event) => setRedeemCode(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="0000"
+                maxLength={4}
+                disabled={shareBusy}
+              />
+            </label>
+            {redeemError ? <p className="playlist-share-error">{redeemError}</p> : null}
+            {shareStatus ? <p className="playlist-share-status">{shareStatus}</p> : null}
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" disabled={shareBusy} onClick={() => setRedeemOpen(false)}>Cancel</button>
+              <button type="button" className="confirm-ok" disabled={shareBusy || redeemCode.length !== 4} onClick={() => void submitRedeem()}>
+                {shareBusy ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}
+                Import
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {editorOpen ? (
         <div className="confirm-overlay playlist-edit-overlay" role="presentation" onClick={closeEditor}>
@@ -192,6 +286,7 @@ export function PlaylistView({
                         <Plus size={12} className="drag-handle" />
                         <TrackCover track={track} />
                         <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
+                        <time className="playlist-edit-duration">{formatTime(track.duration)}</time>
                       </button>
                     );
                   })}
@@ -229,6 +324,7 @@ export function PlaylistView({
                         <GripVertical size={12} className="drag-handle" />
                         <TrackCover track={track} />
                         <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
+                        <time className="playlist-edit-duration">{formatTime(track.duration)}</time>
                       </button>
                     );
                   })}

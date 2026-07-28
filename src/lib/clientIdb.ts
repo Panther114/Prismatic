@@ -14,6 +14,7 @@ export type StoredTrackMeta = {
   duration: number;
   format: string;
   waveform: number[];
+  bitrate?: number | null;
 };
 
 export type StoredTrackAudio = {
@@ -130,6 +131,7 @@ export async function idbPutTrack(record: StoredClientTrack) {
       album: record.album,
       duration: record.duration,
       format: record.format,
+      bitrate: record.bitrate ?? null,
       waveform: record.waveform || [],
     } satisfies StoredTrackMeta);
     transaction.objectStore(AUDIO_STORE).put({

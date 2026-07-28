@@ -18,6 +18,7 @@ import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
 import {playlistStore} from "./lib/playlists";
+import {createPlaylistShare, redeemPlaylistShare} from "./lib/playlistShare";
 import {loadPlayerPrefs, loadPlayerPrefsLocal, savePlayerPrefs} from "./lib/playerPrefs";
 import {
   createQueue,
@@ -99,6 +100,9 @@ export default function App() {
   const [musicDirectory, setMusicDirectory] = useState("");
   const [exportSize, setExportSize] = useState<{width: number; height: number} | null>(null);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareStatus, setShareStatus] = useState("");
+  const [shareCodeDialog, setShareCodeDialog] = useState<null | {code: string; name: string; expiresAt: string}>(null);
   const [confirmDialog, setConfirmDialog] = useState<null | {
     mode: "simple";
     title: string;
@@ -522,10 +526,13 @@ export default function App() {
 
   const playQueue = useCallback((trackIds: string[], options: {shuffle?: boolean; startId?: string; sourceLabel?: string; autoplay?: boolean} = {}) => {
     setQueue((q) => {
+      const shuffle = options.shuffle ?? q.shuffle;
+      // Only pin a start track when the caller asks for one. Defaulting to trackIds[0]
+      // previously forced shuffle to always open on the playlist's first item.
       const next = createQueue(trackIds, {
-        shuffle: options.shuffle ?? q.shuffle,
+        shuffle,
         repeat: q.repeat,
-        startId: options.startId || trackIds[0],
+        startId: options.startId,
         sourceLabel: options.sourceLabel || "Library",
       });
       const id = currentId(next);
@@ -1205,6 +1212,62 @@ export default function App() {
     playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
   };
 
+  const sharePlaylist = async (playlist: Playlist) => {
+    setShareBusy(true);
+    setShareStatus("");
+    setError("");
+    try {
+      const result = await createPlaylistShare(playlist, tracks, (message) => setShareStatus(message));
+      setShareCodeDialog({code: result.code, name: result.name, expiresAt: result.expiresAt});
+      setShareStatus(`Share code ${result.code} ready (expires in 24h).`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setShareStatus("");
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const redeemShareCode = async (code: string) => {
+    setShareBusy(true);
+    setShareStatus("");
+    setError("");
+    try {
+      const result = await redeemPlaylistShare(code, {
+        cloudMode: cloudModeRef.current,
+        onProgress: (message) => setShareStatus(message),
+        refreshTracks: async () => {
+          if (cloudModeRef.current) {
+            await clientLibrary.hydrate().catch(() => undefined);
+            const merged = mergeTracks([], true);
+            setTracks(merged);
+            return merged;
+          }
+          const serverTracks = await api.tracks();
+          const merged = mergeTracks(serverTracks, false);
+          setTracks(merged);
+          return merged;
+        },
+      });
+      setPlaylists(playlistStore.list());
+      if (cloudModeRef.current) {
+        const merged = mergeTracks([], true);
+        setTracks(merged);
+      } else {
+        const serverTracks = await api.tracks().catch(() => tracks);
+        setTracks(mergeTracks(serverTracks, false));
+      }
+      setShareStatus(
+        `Imported “${result.playlist.name}” (${result.imported} new track${result.imported === 1 ? "" : "s"}${result.skipped ? `, ${result.skipped} skipped` : ""}).`,
+      );
+    } catch (cause) {
+      setShareStatus("");
+      throw cause instanceof Error ? cause : new Error(String(cause));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
   const nav = [
     {id: "library" as const, label: "Library", icon: Library},
     {id: "playlists" as const, label: "Playlists", icon: ListMusic},
@@ -1397,6 +1460,10 @@ export default function App() {
             }}
             onPlay={playPlaylist}
             onExport={(pl) => void startPlaylistExport(pl)}
+            onShare={(pl) => void sharePlaylist(pl)}
+            onRedeemShare={redeemShareCode}
+            shareBusy={shareBusy}
+            shareStatus={shareStatus}
             exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
           />
         )}
@@ -1757,6 +1824,46 @@ export default function App() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {shareCodeDialog && (
+        <div className="confirm-overlay" role="presentation" onClick={() => setShareCodeDialog(null)}>
+          <div
+            className="confirm-dialog playlist-share-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="share-code-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-dialog-head">
+              <h2 id="share-code-title">Playlist shared</h2>
+              <button type="button" className="confirm-close" onClick={() => setShareCodeDialog(null)} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <p>
+              “{shareCodeDialog.name}” is available for 24 hours. Another client can open Playlists → Import code and enter:
+            </p>
+            <p className="playlist-share-code" aria-label="Share code">{shareCodeDialog.code}</p>
+            <p className="save-hint">
+              Expires {new Date(shareCodeDialog.expiresAt).toLocaleString()}. Original audio quality is preserved; tracks download one at a time.
+            </p>
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="confirm-cancel"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(shareCodeDialog.code).catch(() => undefined);
+                }}
+              >
+                Copy code
+              </button>
+              <button type="button" className="confirm-ok" autoFocus onClick={() => setShareCodeDialog(null)}>
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -29,6 +29,128 @@ const server = createHttpServer(app);
 
 app.use(express.json({limit: "256kb"}));
 
+// Temporary playlist shares work in local + cloud (Railway). Kept out of the
+// disk library path so cloud hosts stay library-less while still enabling codes.
+const {PlaylistShareStore, SHARE_MAX_TRACKS, SHARE_MAX_DURATION_SEC, SHARE_MAX_TRACK_BYTES} = await import("./playlistShare.js");
+const playlistShares = new PlaylistShareStore(
+  process.env.PRISMATIC_SHARE_DIR || undefined,
+);
+const shareUpload = (await import("multer")).default({
+  storage: (await import("multer")).default.memoryStorage(),
+  limits: {
+    files: SHARE_MAX_TRACKS,
+    fileSize: SHARE_MAX_TRACK_BYTES,
+    fieldSize: 64 * 1024,
+  },
+});
+
+app.post("/api/playlist-share", (request, response, next) => {
+  shareUpload.array("audio", SHARE_MAX_TRACKS)(request, response, (error) => {
+    if (error) {
+      response.status(400).json({error: error instanceof Error ? error.message : "Upload failed"});
+      return;
+    }
+    void (async () => {
+      try {
+        const name = typeof request.body?.name === "string" ? request.body.name : "Shared playlist";
+        let metaList: Array<{
+          fileName: string;
+          title: string;
+          artist: string;
+          album: string;
+          duration: number;
+          bitrate: number | null;
+          format: string;
+          contentType: string;
+        }> = [];
+        try {
+          const raw = typeof request.body?.tracks === "string" ? request.body.tracks : "[]";
+          metaList = JSON.parse(raw) as typeof metaList;
+        } catch {
+          response.status(400).json({error: "Invalid track metadata."});
+          return;
+        }
+        const files = (request.files as Express.Multer.File[] | undefined) || [];
+        if (!files.length || files.length !== metaList.length) {
+          response.status(400).json({error: "Track files and metadata count must match."});
+          return;
+        }
+        const tracks = files.map((file, index) => {
+          const meta = metaList[index] || {} as (typeof metaList)[number];
+          return {
+            fileName: meta.fileName || file.originalname || `track-${index + 1}.mp3`,
+            title: meta.title || meta.fileName || file.originalname || `Track ${index + 1}`,
+            artist: meta.artist || "Unknown artist",
+            album: meta.album || "",
+            duration: Number(meta.duration) || 0,
+            bitrate: meta.bitrate == null ? null : Number(meta.bitrate),
+            format: meta.format || "",
+            contentType: meta.contentType || file.mimetype || "application/octet-stream",
+            buffer: file.buffer,
+          };
+        });
+        const manifest = await playlistShares.create({name, tracks});
+        response.status(201).json({
+          code: manifest.code,
+          expiresAt: manifest.expiresAt,
+          trackCount: manifest.trackCount,
+          totalDuration: manifest.totalDuration,
+          name: manifest.name,
+          limits: {maxTracks: SHARE_MAX_TRACKS, maxDurationSec: SHARE_MAX_DURATION_SEC, ttlHours: 24},
+        });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Share failed";
+        response.status(400).json({error: message});
+      }
+    })().catch(next);
+  });
+});
+
+app.get("/api/playlist-share/:code", async (request, response, next) => {
+  try {
+    const manifest = await playlistShares.getManifest(request.params.code);
+    if (!manifest) {
+      response.status(404).json({error: "Share code not found or expired."});
+      return;
+    }
+    response.json(manifest);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/playlist-share/:code/tracks/:index", async (request, response, next) => {
+  try {
+    const index = Number(request.params.index);
+    if (!Number.isInteger(index) || index < 0) {
+      response.status(400).json({error: "Invalid track index."});
+      return;
+    }
+    const opened = await playlistShares.openTrack(request.params.code, index);
+    if (!opened) {
+      response.status(404).json({error: "Track not found or share expired."});
+      return;
+    }
+    response.setHeader("Content-Type", opened.meta.contentType || "application/octet-stream");
+    response.setHeader("Content-Length", String(opened.meta.size));
+    response.setHeader(
+      "Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(opened.meta.fileName)}`,
+    );
+    response.setHeader("Cache-Control", "private, no-store");
+    opened.stream.on("error", next);
+    opened.stream.pipe(response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Cheap opportunistic cleanup; does not block health.
+void playlistShares.purgeExpired().catch(() => undefined);
+setInterval(() => {
+  void playlistShares.purgeExpired().catch(() => undefined);
+}, 15 * 60 * 1000).unref?.();
+
 app.get("/api/health", async (_request, response) => {
   const distIndex = path.join(root, "dist", "index.html");
   let distOk = false;

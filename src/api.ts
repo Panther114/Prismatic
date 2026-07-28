@@ -62,6 +62,37 @@ export interface PlatformBackend {
   updatePlaylist(id: string, body: {name?: string; trackIds?: string[]}): Promise<Playlist>;
   deletePlaylist(id: string): Promise<Playlist[]>;
   waveform(id: string): Promise<number[]>;
+  createPlaylistShare(form: FormData): Promise<{
+    code: string;
+    expiresAt: string;
+    trackCount: number;
+    totalDuration: number;
+    name: string;
+  }>;
+  getPlaylistShare(code: string): Promise<{
+    code: string;
+    name: string;
+    createdAt: string;
+    expiresAt: string;
+    trackCount: number;
+    totalDuration: number;
+    totalBytes: number;
+    tracks: Array<{
+      index: number;
+      fileName: string;
+      title: string;
+      artist: string;
+      album: string;
+      duration: number;
+      bitrate: number | null;
+      format: string;
+      size: number;
+      contentType: string;
+    }>;
+  }>;
+  downloadPlaylistShareTrack(code: string, index: number): Promise<Blob>;
+  /** Desktop: write raw audio bytes into the managed library folder. */
+  importAudioBytes?(files: Array<{fileName: string; bytes: Uint8Array}>): Promise<{tracks: Track[]; imported: number; skipped: number}>;
 }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
@@ -148,6 +179,29 @@ class WebBackend implements PlatformBackend {
     if (!response.ok) return [];
     return response.json() as Promise<number[]>;
   }
+  createPlaylistShare = (form: FormData) =>
+    json<{code: string; expiresAt: string; trackCount: number; totalDuration: number; name: string}>(
+      "/api/playlist-share",
+      {method: "POST", body: form},
+    );
+  getPlaylistShare = (code: string) =>
+    json<ReturnType<PlatformBackend["getPlaylistShare"]> extends Promise<infer T> ? T : never>(
+      `/api/playlist-share/${encodeURIComponent(code)}`,
+    );
+  async downloadPlaylistShareTrack(code: string, index: number) {
+    const response = await fetch(`/api/playlist-share/${encodeURIComponent(code)}/tracks/${index}`);
+    if (!response.ok) {
+      let message = `Download failed (${response.status})`;
+      try {
+        const body = await response.json() as {error?: string};
+        if (body?.error) message = body.error;
+      } catch {
+        // ignore
+      }
+      throw new Error(message);
+    }
+    return response.blob();
+  }
 }
 
 type DesktopTrack = Omit<Track, "mediaUrl" | "coverUrl"> & {
@@ -219,6 +273,77 @@ class TauriBackend implements PlatformBackend {
     invoke<Playlist>("update_playlist", {id, name: body.name, trackIds: body.trackIds});
   deletePlaylist = (id: string) => invoke<Playlist[]>("delete_playlist", {id});
   waveform = (id: string) => invoke<number[]>("waveform", {id});
+  /** Desktop shares use the same HTTP share host as the web app when configured. */
+  private shareBase() {
+    try {
+      const stored = localStorage.getItem("prismatic.shareApiBase");
+      if (stored) return stored.replace(/\/$/, "");
+    } catch {
+      // ignore
+    }
+    return "";
+  }
+  private async shareJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const base = this.shareBase();
+    if (!base) {
+      throw new Error(
+        "Desktop playlist share needs a cloud host URL. Set localStorage prismatic.shareApiBase to your Railway app origin (e.g. https://your-app.up.railway.app).",
+      );
+    }
+    const response = await fetch(`${base}${path}`, init);
+    const text = await response.text();
+    let body: unknown = null;
+    if (text) {
+      try {
+        body = JSON.parse(text) as unknown;
+      } catch {
+        throw new Error(response.ok ? `Invalid JSON from share host` : `Share host error (${response.status})`);
+      }
+    }
+    if (!response.ok) {
+      throw new Error((body as {error?: string} | null)?.error || `Share host error (${response.status})`);
+    }
+    return body as T;
+  }
+  createPlaylistShare = (form: FormData) =>
+    this.shareJson<{code: string; expiresAt: string; trackCount: number; totalDuration: number; name: string}>(
+      "/api/playlist-share",
+      {method: "POST", body: form},
+    );
+  getPlaylistShare = (code: string) =>
+    this.shareJson<Awaited<ReturnType<PlatformBackend["getPlaylistShare"]>>>(
+      `/api/playlist-share/${encodeURIComponent(code)}`,
+    );
+  async downloadPlaylistShareTrack(code: string, index: number) {
+    const base = this.shareBase();
+    if (!base) {
+      throw new Error(
+        "Desktop playlist share needs a cloud host URL. Set localStorage prismatic.shareApiBase to your Railway app origin.",
+      );
+    }
+    const response = await fetch(`${base}/api/playlist-share/${encodeURIComponent(code)}/tracks/${index}`);
+    if (!response.ok) {
+      let message = `Download failed (${response.status})`;
+      try {
+        const body = await response.json() as {error?: string};
+        if (body?.error) message = body.error;
+      } catch {
+        // ignore
+      }
+      throw new Error(message);
+    }
+    return response.blob();
+  }
+  async importAudioBytes(files: Array<{fileName: string; bytes: Uint8Array}>) {
+    // Tauri IPC serializes bytes as number arrays; keep shares modest (≤25 tracks / <100 min).
+    const tracks = (await invoke<DesktopTrack[]>("import_audio_bytes", {
+      files: files.map((file) => ({
+        fileName: file.fileName,
+        bytes: Array.from(file.bytes),
+      })),
+    })).map(mapDesktopTrack);
+    return {tracks, imported: files.length, skipped: 0};
+  }
 }
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

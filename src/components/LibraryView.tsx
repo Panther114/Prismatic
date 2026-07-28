@@ -34,6 +34,15 @@ const formatTime = (seconds: number) => {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 };
 
+/** Display bitrate left of duration — kbps when known. */
+export const formatBitrate = (bitrate: number | null | undefined) => {
+  if (bitrate == null || !Number.isFinite(bitrate) || bitrate <= 0) return null;
+  // music-metadata / lofty may report bits/s or already kbps.
+  const kbps = bitrate >= 1000 ? Math.round(bitrate / 1000) : Math.round(bitrate);
+  if (kbps <= 0) return null;
+  return `${kbps} kbps`;
+};
+
 function sortTracks(tracks: Track[], sort: LibrarySort) {
   return [...tracks].sort((a, b) => {
     if (sort === "duration") return a.duration - b.duration;
@@ -53,6 +62,8 @@ function VirtualTrackList({
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(640);
+  /** Only one “add to playlist” menu open at a time; closed on pick / outside / Escape. */
+  const [openMenuTrackId, setOpenMenuTrackId] = useState<string | null>(null);
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN * 2;
   const end = Math.min(tracks.length, start + visibleCount);
@@ -77,16 +88,44 @@ function VirtualTrackList({
     };
   }, [tracks.length]);
 
+  useEffect(() => {
+    if (!openMenuTrackId) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest?.(".song-playlist-menu")) return;
+      setOpenMenuTrackId(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenMenuTrackId(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [openMenuTrackId]);
+
+  // Close menu when its row scrolls out of the virtual window.
+  useEffect(() => {
+    if (!openMenuTrackId) return;
+    if (!tracks.some((track) => track.id === openMenuTrackId)) setOpenMenuTrackId(null);
+  }, [openMenuTrackId, tracks]);
+
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     setScrollTop(element.scrollTop);
     if (element.clientHeight !== viewportHeight) setViewportHeight(element.clientHeight);
+    if (openMenuTrackId) setOpenMenuTrackId(null);
   };
 
   return (
     <div ref={containerRef} className="song-list custom-scroll" onScroll={onScroll}>
       <div style={{height: start * ROW_HEIGHT}} aria-hidden="true" />
-      {visible.map((track) => (
+      {visible.map((track) => {
+        const bitrateLabel = formatBitrate(track.bitrate);
+        const menuOpen = openMenuTrackId === track.id;
+        return (
         <article key={track.id} className={`song-row ${selectedId === track.id ? "selected" : ""}`}>
           <button
             type="button"
@@ -103,21 +142,45 @@ function VirtualTrackList({
               <small>{track.artist}</small>
             </span>
             <span className="song-album">{track.album || "Unknown album"}</span>
-            <time>{formatTime(track.duration)}</time>
+            <span className="song-meta">
+              {bitrateLabel ? <span className="song-bitrate" title="Audio bitrate">{bitrateLabel}</span> : null}
+              <time>{formatTime(track.duration)}</time>
+            </span>
           </button>
           <div className="song-row-actions">
-            <details className="song-playlist-menu">
-              <summary title="Add to playlist" aria-label={`Add ${track.title} to a playlist`}><ListPlus size={14} /></summary>
-              <div className="song-menu-popover">
+            <details
+              className="song-playlist-menu"
+              open={menuOpen}
+              onToggle={(event) => {
+                // Controlled open state so the menu always dismisses cleanly after a pick.
+                const nextOpen = event.currentTarget.open;
+                setOpenMenuTrackId(nextOpen ? track.id : (openMenuTrackId === track.id ? null : openMenuTrackId));
+              }}
+            >
+              <summary
+                title="Add to playlist"
+                aria-label={`Add ${track.title} to a playlist`}
+                onClick={(event) => {
+                  // Prevent summary default toggle fighting controlled state.
+                  event.preventDefault();
+                  setOpenMenuTrackId(menuOpen ? null : track.id);
+                }}
+              >
+                <ListPlus size={14} />
+              </summary>
+              <div className="song-menu-popover" role="menu">
                 {!playlists.length ? <span className="song-menu-empty">No playlists yet</span> : null}
               {playlists.map((playlist) => (
                 <button
                   type="button"
                   key={playlist.id}
+                  role="menuitem"
                   disabled={playlist.trackIds.includes(track.id)}
                   onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
                     onAddPlaylist(playlist.id, track.id);
-                    event.currentTarget.closest("details")?.removeAttribute("open");
+                    setOpenMenuTrackId(null);
                   }}
                 >
                   <Music2 size={13} />{playlist.trackIds.includes(track.id) ? `In ${playlist.name}` : playlist.name}
@@ -137,7 +200,8 @@ function VirtualTrackList({
             </button>
           </div>
         </article>
-      ))}
+        );
+      })}
       <div style={{height: Math.max(0, tracks.length - end) * ROW_HEIGHT}} aria-hidden="true" />
     </div>
   );

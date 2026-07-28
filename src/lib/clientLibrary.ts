@@ -107,7 +107,7 @@ export class ClientLibrary {
           artist: row.artist,
           album: row.album,
           duration: row.duration,
-          bitrate: null,
+          bitrate: row.bitrate ?? null,
           format: row.format,
           clientOnly: true,
         };
@@ -172,6 +172,7 @@ export class ClientLibrary {
         album: track.album,
         duration: track.duration,
         format: track.format,
+        bitrate: track.bitrate,
         waveform: extras.waveform,
         audio,
         audioType: file.type || "audio/mpeg",
@@ -209,12 +210,16 @@ export class ClientLibrary {
       let title = baseName(file.name);
       let artist = "Unknown Artist";
       let album = "";
+      let bitrate: number | null = null;
       try {
         const {parseBlob} = await import("music-metadata");
         const meta = await parseBlob(file);
         title = meta.common.title || title;
         artist = meta.common.artist || artist;
         album = meta.common.album || "";
+        if (meta.format.bitrate && Number.isFinite(meta.format.bitrate)) {
+          bitrate = Math.round(meta.format.bitrate);
+        }
       } catch {
         // Filename fallback is fine.
       }
@@ -232,7 +237,7 @@ export class ClientLibrary {
         artist,
         album,
         duration,
-        bitrate: null,
+        bitrate,
         format: (file.name.split(".").pop() || "audio").toUpperCase(),
         clientOnly: true,
       };

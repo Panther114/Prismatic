@@ -1,17 +1,19 @@
-# Prismatic 2.1.2
+# Prismatic 2.1.3
 
-## New: signed auto-update
+## Bug fixes
 
-- **In-app updates** for the desktop app (Windows + macOS). Prismatic checks GitHub Releases for a newer version, shows a dedicated update UI, downloads a **signed** package, verifies it with the embedded public key, then installs and relaunches.
-- **Settings → Software updates** — manual “Check for updates” and install controls.
-- **Quiet startup check** (every 6 hours at most). Never installs without your confirmation in the update dialog.
-- **Release manifest** — each GitHub Release includes `latest.json` plus `.sig` files used by the Tauri updater.
+- **Shuffle playlists** — starting a shuffled playlist no longer always opens on the first track; playback begins on a random item from the shuffled order.
+- **Add to playlist menu** — the library “add to playlist” popover closes after you pick a playlist, when you click outside, press Escape, or scroll the list.
 
-## Notes
+## Features
 
-- Installers remain **Authenticode-unsigned**, so Windows SmartScreen may still appear on first download. That is separate from updater signing (minisign), which protects the update channel.
-- **Older builds (≤ 2.1.1) cannot auto-update.** Install 2.1.2 once manually; from then on, 2.1.2+ can update themselves.
+- **Playlist share (1-day code)** — share a playlist with a temporary 4-digit code. Another client can import the code to download original-quality audio (no re-encode), add tracks to their library, and forge the playlist automatically.
+  - Limits (to keep Railway light): **≤ 25 tracks** and **under 100 minutes** total duration.
+  - Packages expire after **24 hours**; tracks download **one at a time**.
+  - Web/cloud uses same-origin `/api/playlist-share`. Desktop can use a Railway host via `localStorage.prismatic.shareApiBase`.
+- **Edit playlist durations** — each track in the create/edit dialog shows its length.
+- **Library bitrate** — each song row shows audio bitrate (kbps) to the left of the duration when known.
 
 ## Upgrade
 
-Installing 2.1.2 preserves `%USERPROFILE%\Music\Prismatic` (and macOS `~/Music/Prismatic`) plus `.prismatic` state. Re-run the installer over an existing install is safe; no library wipe.
+Installing 2.1.3 preserves `%USERPROFILE%\Music\Prismatic` (and macOS `~/Music/Prismatic`) plus `.prismatic` state. Re-run the installer over an existing install is safe.
