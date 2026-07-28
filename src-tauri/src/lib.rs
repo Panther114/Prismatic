@@ -14,7 +14,8 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
@@ -1014,6 +1015,312 @@ fn read_track_bytes(paths: State<LibraryPaths>, id: String) -> Result<Vec<u8>, S
     fs::read(path).map_err(display_err)
 }
 
+const SHARE_MAX_TRACKS: usize = 25;
+const SHARE_MAX_DURATION_SEC: f64 = 100.0 * 60.0;
+const SHARE_MAX_TRACK_BYTES: u64 = 120 * 1024 * 1024;
+
+fn normalize_share_base(base: &str) -> String {
+    base.trim().trim_end_matches('/').to_owned()
+}
+
+fn share_http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(45))
+        .user_agent("Prismatic-Desktop/2.1")
+        .build()
+        .map_err(display_err)
+}
+
+/// Wake Railway Serverless host (retries on cold boot / connection errors).
+#[tauri::command]
+fn share_wake(base_url: String) -> Result<(), String> {
+    let base = normalize_share_base(&base_url);
+    if base.is_empty() {
+        return Err("Share host URL is empty".into());
+    }
+    let client = share_http_client()?;
+    let health = format!("{base}/api/health");
+    let mut last = String::from("no response");
+    for attempt in 0..12 {
+        match client.get(&health).send() {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                last = format!("HTTP {}", response.status().as_u16());
+                let code = response.status().as_u16();
+                if code < 500 && code != 502 && code != 503 && code != 504 {
+                    return Err(format!("Share host health failed ({code})"));
+                }
+            }
+            Err(error) => {
+                last = error.to_string();
+            }
+        }
+        thread::sleep(Duration::from_millis(1200 + attempt as u64 * 700));
+    }
+    Err(format!(
+        "Share server did not wake at {base} after several tries ({last}). Is Railway Serverless still deploying?"
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareCreateResult {
+    code: String,
+    expires_at: String,
+    track_count: u32,
+    total_duration: f64,
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareTrackMetaOut {
+    file_name: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration: f64,
+    bitrate: Option<u32>,
+    format: String,
+    content_type: String,
+}
+
+/// Pack library tracks and POST multipart share package via native HTTP (not WebView).
+#[tauri::command]
+fn share_create_playlist(
+    paths: State<LibraryPaths>,
+    base_url: String,
+    name: String,
+    track_ids: Vec<String>,
+) -> Result<ShareCreateResult, String> {
+    if track_ids.is_empty() {
+        return Err("Playlist is empty.".into());
+    }
+    if track_ids.len() > SHARE_MAX_TRACKS {
+        return Err(format!(
+            "Shared playlists are limited to {SHARE_MAX_TRACKS} tracks."
+        ));
+    }
+
+    let mut tracks = Vec::with_capacity(track_ids.len());
+    let mut total_duration = 0.0_f64;
+    for id in &track_ids {
+        let track = find_track(&paths, id)?;
+        let path = Path::new(&track.media_path);
+        if !path.is_file() {
+            return Err(format!("Audio file missing: {}", track.file_name));
+        }
+        let size = fs::metadata(path).map_err(display_err)?.len();
+        if size == 0 {
+            return Err(format!("Track “{}” is empty.", track.title));
+        }
+        if size > SHARE_MAX_TRACK_BYTES {
+            return Err(format!(
+                "Track “{}” exceeds the per-file size limit.",
+                track.title
+            ));
+        }
+        total_duration += track.duration;
+        tracks.push(track);
+    }
+    if total_duration >= SHARE_MAX_DURATION_SEC {
+        return Err("Shared playlists must be under 100 minutes total.".into());
+    }
+
+    share_wake(base_url.clone())?;
+
+    let base = normalize_share_base(&base_url);
+    let client = share_http_client()?;
+
+    let playlist_name = if name.trim().is_empty() {
+        "Shared playlist".to_owned()
+    } else {
+        name.trim().to_owned()
+    };
+
+    let mut meta: Vec<ShareTrackMetaOut> = Vec::with_capacity(tracks.len());
+    let mut file_parts: Vec<(String, String, Vec<u8>)> = Vec::with_capacity(tracks.len());
+    for track in &tracks {
+        let path = Path::new(&track.media_path);
+        let bytes = fs::read(path).map_err(display_err)?;
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("mp3")
+            .to_lowercase();
+        let content_type = match ext.as_str() {
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "flac" => "audio/flac",
+            "m4a" | "mp4" => "audio/mp4",
+            "aac" => "audio/aac",
+            "ogg" | "opus" => "audio/ogg",
+            _ => "application/octet-stream",
+        }
+        .to_owned();
+        meta.push(ShareTrackMetaOut {
+            file_name: track.file_name.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            duration: track.duration,
+            bitrate: track.bitrate,
+            format: track.format.clone(),
+            content_type: content_type.clone(),
+        });
+        file_parts.push((track.file_name.clone(), content_type, bytes));
+    }
+    let meta_json = serde_json::to_string(&meta).map_err(display_err)?;
+
+    let mut last_err = String::new();
+    for attempt in 0..6 {
+        let mut form = reqwest::blocking::multipart::Form::new()
+            .text("name", playlist_name.clone())
+            .text("tracks", meta_json.clone());
+        for (file_name, content_type, bytes) in &file_parts {
+            let part = reqwest::blocking::multipart::Part::bytes(bytes.clone())
+                .file_name(file_name.clone())
+                .mime_str(content_type)
+                .map_err(display_err)?;
+            form = form.part("audio", part);
+        }
+
+        match client
+            .post(format!("{base}/api/playlist-share"))
+            .multipart(form)
+            .send()
+        {
+            Ok(response) => {
+                let status = response.status();
+                let text = response.text().unwrap_or_default();
+                if status.is_success() {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&text).map_err(display_err)?;
+                    let code = value
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    if code.len() != 4 {
+                        return Err("Share host returned an invalid code.".into());
+                    }
+                    return Ok(ShareCreateResult {
+                        code,
+                        expires_at: value
+                            .get("expiresAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        track_count: value
+                            .get("trackCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(tracks.len() as u64) as u32,
+                        total_duration: value
+                            .get("totalDuration")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(total_duration),
+                        name: value
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&playlist_name)
+                            .to_owned(),
+                    });
+                }
+                last_err = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("error")
+                            .and_then(|e| e.as_str())
+                            .map(|s| s.to_owned())
+                    })
+                    .unwrap_or_else(|| format!("Share host error ({})", status.as_u16()));
+                let code = status.as_u16();
+                if code != 502 && code != 503 && code != 504 && code < 500 {
+                    return Err(last_err);
+                }
+            }
+            Err(error) => {
+                last_err = error.to_string();
+            }
+        }
+        if attempt + 1 < 6 {
+            thread::sleep(Duration::from_millis(1500 + attempt as u64 * 1000));
+        }
+    }
+    Err(format!("Share upload failed after retries: {last_err}"))
+}
+
+#[tauri::command]
+fn share_get_manifest(base_url: String, code: String) -> Result<serde_json::Value, String> {
+    share_wake(base_url.clone())?;
+    let base = normalize_share_base(&base_url);
+    let client = share_http_client()?;
+    let url = format!("{base}/api/playlist-share/{}", code.trim());
+    let mut last = String::new();
+    for attempt in 0..6 {
+        match client.get(&url).send() {
+            Ok(response) => {
+                let status = response.status();
+                let text = response.text().unwrap_or_default();
+                if status.is_success() {
+                    return serde_json::from_str(&text).map_err(display_err);
+                }
+                last = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("error")
+                            .and_then(|e| e.as_str())
+                            .map(|s| s.to_owned())
+                    })
+                    .unwrap_or_else(|| format!("Share host error ({})", status.as_u16()));
+                let code_n = status.as_u16();
+                if code_n != 502 && code_n != 503 && code_n != 504 && code_n < 500 {
+                    return Err(last);
+                }
+            }
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(1200 + attempt as u64 * 800));
+    }
+    Err(format!("Could not load share: {last}"))
+}
+
+#[tauri::command]
+fn share_download_track(
+    base_url: String,
+    code: String,
+    index: u32,
+) -> Result<Vec<u8>, String> {
+    share_wake(base_url.clone())?;
+    let base = normalize_share_base(&base_url);
+    let client = share_http_client()?;
+    let url = format!(
+        "{base}/api/playlist-share/{}/tracks/{}",
+        code.trim(),
+        index
+    );
+    let mut last = String::new();
+    for attempt in 0..6 {
+        match client.get(&url).send() {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return response.bytes().map(|b| b.to_vec()).map_err(display_err);
+                }
+                last = format!("HTTP {}", status.as_u16());
+                let code_n = status.as_u16();
+                if code_n != 502 && code_n != 503 && code_n != 504 && code_n < 500 {
+                    return Err(format!("Download failed ({code_n})"));
+                }
+            }
+            Err(error) => last = error.to_string(),
+        }
+        thread::sleep(Duration::from_millis(1200 + attempt as u64 * 800));
+    }
+    Err(format!("Download failed after retries: {last}"))
+}
+
 #[tauri::command]
 fn waveform(paths: State<LibraryPaths>, id: String) -> Result<Vec<f32>, String> {
     let cache_directory = paths.state_directory.join("waveforms");
@@ -1075,6 +1382,10 @@ pub fn run() {
             save_player_prefs,
             waveform,
             read_track_bytes,
+            share_wake,
+            share_create_playlist,
+            share_get_manifest,
+            share_download_track,
             output_directory,
         ])
         .run(tauri::generate_context!())

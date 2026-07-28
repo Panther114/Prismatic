@@ -1,6 +1,6 @@
 [package]
 name = "prismatic"
-version = "2.1.6"
+version = "2.1.7"
 description = "A lightweight cinematic music player and visual exporter"
 authors = ["Prismatic"]
 edition = "2021"
@@ -35,6 +35,8 @@ lofty = "0.22"
 time = { version = "0.3", features = ["formatting"] }
 symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 notify = "8"
+# Desktop playlist-share HTTP (bypasses WebView CSP / flaky fetch to Railway).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "multipart", "json"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

@@ -1,17 +1,15 @@
-# Prismatic 2.1.6
+# Prismatic 2.1.7
 
-## Fix: Share “Failed to fetch”
+## Fix: Share stuck on “cold start — retry…”
 
-Desktop share was packing tracks with `fetch(asset://…)` which **WebView CSP blocks** — so share failed before reaching Railway.
+Desktop was calling the Railway share API with **WebView `fetch`**, which keeps failing (`Failed to fetch` / endless cold-start retries) even when the server is healthy.
 
-- Read track bytes through a **Rust command** (`read_track_bytes`) instead of webview fetch.
-- Allow `https://prismatic.up.railway.app` and asset hosts in CSP `connect-src`.
-- Clearer errors when the share server is unreachable / still cold-starting.
+**Desktop share now uses native HTTP (Rust `reqwest`)**:
 
-## Share UI (2.1.5)
-
-Immediate share dialog with progress, large code, and copy button.
+- Wake, upload, manifest lookup, and download all run outside the WebView
+- Tracks are read from disk in Rust and multipart-uploaded directly
+- Retries still handle Railway Serverless cold boots
 
 ## Upgrade
 
-Install 2.1.6 over any previous build; library data is preserved.
+Install **2.1.7**. Library data is preserved. Prefer this over 2.1.5/2.1.6 for share.

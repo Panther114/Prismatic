@@ -132,6 +132,36 @@ export async function createPlaylistShare(
   const limits = validateShareLimits(tracks);
   if (!limits.ok) throw new Error(limits.error);
 
+  // Desktop: native HTTP + disk reads (WebView fetch to Railway is unreliable / CSP-blocked).
+  if (isTauri) {
+    onProgress?.("Waking share server & packing tracks…", 0.05);
+    const {invoke} = await import("@tauri-apps/api/core");
+    const {getConfiguredShareBase} = await import("./shareHost");
+    onProgress?.("Uploading to share server…", 0.35);
+    const result = await invoke<{
+      code: string;
+      expiresAt: string;
+      trackCount: number;
+      totalDuration: number;
+      name: string;
+    }>("share_create_playlist", {
+      baseUrl: getConfiguredShareBase(),
+      name: playlist.name,
+      trackIds: tracks.map((t) => t.id),
+    });
+    onProgress?.("Done", 1);
+    if (!result?.code || String(result.code).length !== 4) {
+      throw new Error("Share host returned an invalid code.");
+    }
+    return {
+      code: result.code,
+      expiresAt: result.expiresAt,
+      trackCount: result.trackCount,
+      totalDuration: result.totalDuration,
+      name: result.name,
+    };
+  }
+
   const form = new FormData();
   form.append("name", playlist.name);
   const meta: Array<{
@@ -178,7 +208,22 @@ export async function redeemPlaylistShare(
   if (normalized.length !== 4) throw new Error("Enter a 4-digit share code.");
 
   options.onProgress?.("Looking up share…", 0.02);
-  const manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
+
+  type Manifest = Awaited<ReturnType<typeof api.getPlaylistShare>>;
+  let manifest: Manifest;
+
+  if (isTauri) {
+    const {invoke} = await import("@tauri-apps/api/core");
+    const {getConfiguredShareBase} = await import("./shareHost");
+    options.onProgress?.("Waking share server…", 0.04);
+    manifest = await invoke<Manifest>("share_get_manifest", {
+      baseUrl: getConfiguredShareBase(),
+      code: normalized,
+    });
+  } else {
+    manifest = await api.getPlaylistShare(normalized, (message) => options.onProgress?.(message, 0.04));
+  }
+
   const limits = validateShareLimits(
     manifest.tracks.map((t) => ({
       id: String(t.index),
@@ -206,12 +251,24 @@ export async function redeemPlaylistShare(
       `Downloading ${i + 1}/${manifest.tracks.length}: ${meta.title}`,
       0.05 + (i / manifest.tracks.length) * 0.7,
     );
-    // Sequential downloads keep Railway egress/CPU gentle; cold-start retries inside api.
-    const blob = await api.downloadPlaylistShareTrack(
-      normalized,
-      meta.index,
-      (message) => options.onProgress?.(message, 0.05 + (i / manifest.tracks.length) * 0.7),
-    );
+    let blob: Blob;
+    if (isTauri) {
+      const {invoke} = await import("@tauri-apps/api/core");
+      const {getConfiguredShareBase} = await import("./shareHost");
+      const raw = await invoke<number[] | Uint8Array>("share_download_track", {
+        baseUrl: getConfiguredShareBase(),
+        code: normalized,
+        index: meta.index,
+      });
+      const u8 = raw instanceof Uint8Array ? raw : Uint8Array.from(raw);
+      blob = new Blob([u8], {type: meta.contentType || "audio/mpeg"});
+    } else {
+      blob = await api.downloadPlaylistShareTrack(
+        normalized,
+        meta.index,
+        (message) => options.onProgress?.(message, 0.05 + (i / manifest.tracks.length) * 0.7),
+      );
+    }
     const type = meta.contentType || blob.type || "audio/mpeg";
     files.push(new File([blob], meta.fileName, {type}));
   }
