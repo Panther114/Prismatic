@@ -1,6 +1,7 @@
 /**
  * Temporary playlist share packages (4-digit codes, 24h TTL).
- * Disk-backed only — never holds full packages in RAM.
+ * Disk-backed only. Uploads are per-track so each request stays under Railway's
+ * 5-minute request-body limit.
  */
 import {promises as fs, createReadStream, existsSync} from "node:fs";
 import path from "node:path";
@@ -10,12 +11,11 @@ import {randomInt} from "node:crypto";
 export const SHARE_MAX_TRACKS = 25;
 export const SHARE_MAX_DURATION_SEC = 100 * 60;
 export const SHARE_TTL_MS = 24 * 60 * 60 * 1000;
-/** Soft package cap so a single share cannot fill the volume. */
 export const SHARE_MAX_PACKAGE_BYTES = 700 * 1024 * 1024;
 export const SHARE_MAX_TRACK_BYTES = 120 * 1024 * 1024;
 export const SHARE_MAX_ACTIVE = 40;
-/** One in-flight share upload at a time keeps peak RSS flat under multi-user load. */
-export const SHARE_MAX_CONCURRENT_UPLOADS = 1;
+/** Concurrent single-track uploads (not whole-playlist posts). */
+export const SHARE_MAX_CONCURRENT_UPLOADS = 4;
 
 export type ShareTrackMeta = {
   index: number;
@@ -39,9 +39,11 @@ export type ShareManifest = {
   totalDuration: number;
   totalBytes: number;
   tracks: ShareTrackMeta[];
+  /** false while tracks are still uploading; redeem only when true. */
+  complete: boolean;
 };
 
-export type ShareTrackInput = {
+export type ShareTrackMetaInput = {
   fileName: string;
   title: string;
   artist: string;
@@ -50,8 +52,6 @@ export type ShareTrackInput = {
   bitrate: number | null;
   format: string;
   contentType: string;
-  /** Absolute path to a temp file on disk (multer diskStorage). Moved into the share dir. */
-  tempPath: string;
 };
 
 type IndexEntry = {
@@ -70,7 +70,6 @@ function safeFileName(name: string, fallback: string) {
   return base.slice(0, 180);
 }
 
-/** Prefer rename (no extra copy); fall back to copy+unlink across volumes. */
 async function moveFile(src: string, dest: string) {
   try {
     await fs.rename(src, dest);
@@ -78,6 +77,10 @@ async function moveFile(src: string, dest: string) {
     await fs.copyFile(src, dest);
     await fs.unlink(src).catch(() => undefined);
   }
+}
+
+function storedTrackName(index: number, fileName: string) {
+  return `track-${String(index).padStart(2, "0")}${path.extname(fileName) || ".mp3"}`;
 }
 
 export class PlaylistShareStore {
@@ -125,6 +128,26 @@ export class PlaylistShareStore {
     await this.ready;
   }
 
+  private async writeManifest(dir: string, manifest: ShareManifest) {
+    await fs.writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  }
+
+  private async readManifest(code: string): Promise<{entry: IndexEntry; manifest: ShareManifest} | null> {
+    await this.ensureReady();
+    const normalized = String(code || "").trim();
+    if (!/^\d{4}$/.test(normalized)) return null;
+    const entry = this.index.get(normalized);
+    if (!entry) return null;
+    try {
+      const raw = JSON.parse(await fs.readFile(path.join(entry.dir, "manifest.json"), "utf8")) as ShareManifest;
+      if (raw.complete === undefined) raw.complete = true; // legacy packages
+      return {entry, manifest: raw};
+    } catch {
+      this.index.delete(normalized);
+      return null;
+    }
+  }
+
   async purgeExpired() {
     await this.ensureReady();
     const now = Date.now();
@@ -159,106 +182,143 @@ export class PlaylistShareStore {
     return {totalDuration, totalBytes};
   }
 
-  /**
-   * Build a share from temp files on disk. Tracks are moved one-by-one so peak
-   * RAM stays near constant regardless of playlist size.
-   */
-  async createFromTempFiles(input: {name: string; tracks: ShareTrackInput[]}): Promise<ShareManifest> {
+  /** Create a draft share session (metadata only). Client uploads tracks one-by-one. */
+  async beginSession(input: {name: string; tracks: ShareTrackMetaInput[]}): Promise<ShareManifest> {
     await this.ensureReady();
     await this.purgeExpired();
-
     if (this.index.size >= SHARE_MAX_ACTIVE) {
       throw new Error("Share capacity reached on this host. Try again later.");
     }
-
-    const sized: Array<ShareTrackInput & {size: number}> = [];
-    for (const track of input.tracks) {
-      const stat = await fs.stat(track.tempPath).catch(() => null);
-      if (!stat?.isFile() || !stat.size) {
-        throw new Error(`Track “${track.title || track.fileName}” was empty or missing.`);
-      }
-      if (stat.size > SHARE_MAX_TRACK_BYTES) {
-        throw new Error(`Track “${track.title || track.fileName}” exceeds the per-file size limit.`);
-      }
-      sized.push({...track, size: stat.size});
-    }
-
-    const {totalDuration, totalBytes} = this.validateLimits(sized);
-
+    const {totalDuration} = this.validateLimits(input.tracks.map((t) => ({duration: t.duration, size: 0})));
     const code = this.allocateCode();
     const dir = path.join(this.root, code);
     await fs.mkdir(dir, {recursive: true});
-
     const createdAt = nowIso();
     const expiresAt = new Date(Date.now() + SHARE_TTL_MS).toISOString();
-    const tracks: ShareTrackMeta[] = [];
-
-    try {
-      for (let index = 0; index < sized.length; index += 1) {
-        const track = sized[index];
-        const fileName = safeFileName(track.fileName, `track-${index + 1}.mp3`);
-        const storedName = `track-${String(index).padStart(2, "0")}${path.extname(fileName) || ".mp3"}`;
-        const dest = path.join(dir, storedName);
-        // Sequential move: only one file is in flight; temp is freed immediately.
-        await moveFile(track.tempPath, dest);
-        tracks.push({
-          index,
-          fileName,
-          title: (track.title || fileName).trim() || fileName,
-          artist: (track.artist || "Unknown artist").trim() || "Unknown artist",
-          album: (track.album || "").trim(),
-          duration: Number(track.duration) || 0,
-          bitrate: track.bitrate == null ? null : Math.round(Number(track.bitrate)),
-          format: (track.format || path.extname(fileName).slice(1) || "audio").toUpperCase(),
-          size: track.size,
-          contentType: track.contentType || "application/octet-stream",
-        });
-      }
-
-      const manifest: ShareManifest = {
-        code,
-        name: (input.name || "Shared playlist").trim() || "Shared playlist",
-        createdAt,
-        expiresAt,
-        trackCount: tracks.length,
-        totalDuration,
-        totalBytes,
-        tracks,
+    const tracks: ShareTrackMeta[] = input.tracks.map((track, index) => {
+      const fileName = safeFileName(track.fileName, `track-${index + 1}.mp3`);
+      return {
+        index,
+        fileName,
+        title: (track.title || fileName).trim() || fileName,
+        artist: (track.artist || "Unknown artist").trim() || "Unknown artist",
+        album: (track.album || "").trim(),
+        duration: Number(track.duration) || 0,
+        bitrate: track.bitrate == null ? null : Math.round(Number(track.bitrate)),
+        format: (track.format || path.extname(fileName).slice(1) || "audio").toUpperCase(),
+        size: 0,
+        contentType: track.contentType || "application/octet-stream",
       };
-      await fs.writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-      this.index.set(code, {code, dir, expiresAt: Date.parse(expiresAt), totalBytes});
-      return manifest;
-    } catch (error) {
-      await fs.rm(dir, {recursive: true, force: true}).catch(() => undefined);
-      throw error;
-    }
+    });
+    const manifest: ShareManifest = {
+      code,
+      name: (input.name || "Shared playlist").trim() || "Shared playlist",
+      createdAt,
+      expiresAt,
+      trackCount: tracks.length,
+      totalDuration,
+      totalBytes: 0,
+      tracks,
+      complete: false,
+    };
+    await this.writeManifest(dir, manifest);
+    this.index.set(code, {code, dir, expiresAt: Date.parse(expiresAt), totalBytes: 0});
+    return manifest;
   }
 
-  async getManifest(code: string): Promise<ShareManifest | null> {
-    await this.ensureReady();
-    await this.purgeExpired();
-    const normalized = String(code || "").trim();
-    if (!/^\d{4}$/.test(normalized)) return null;
-    const entry = this.index.get(normalized);
-    if (!entry) return null;
-    try {
-      const raw = JSON.parse(await fs.readFile(path.join(entry.dir, "manifest.json"), "utf8")) as ShareManifest;
-      return raw;
-    } catch {
-      this.index.delete(normalized);
-      return null;
+  /** Attach one track file (from multer temp path) to a draft session. */
+  async putTrack(code: string, index: number, tempPath: string, patch?: Partial<ShareTrackMetaInput>): Promise<ShareManifest> {
+    const loaded = await this.readManifest(code);
+    if (!loaded) throw new Error("Share session not found or expired.");
+    const {entry, manifest} = loaded;
+    if (manifest.complete) throw new Error("Share is already finalized.");
+    const meta = manifest.tracks.find((t) => t.index === index);
+    if (!meta) throw new Error(`Invalid track index ${index}.`);
+
+    const stat = await fs.stat(tempPath).catch(() => null);
+    if (!stat?.isFile() || !stat.size) throw new Error("Track file was empty or missing.");
+    if (stat.size > SHARE_MAX_TRACK_BYTES) {
+      throw new Error(`Track “${meta.title}” exceeds the per-file size limit.`);
     }
+
+    if (patch?.fileName) meta.fileName = safeFileName(patch.fileName, meta.fileName);
+    if (patch?.title) meta.title = patch.title.trim() || meta.title;
+    if (patch?.artist) meta.artist = patch.artist.trim() || meta.artist;
+    if (patch?.album !== undefined) meta.album = String(patch.album || "").trim();
+    if (patch?.duration != null) meta.duration = Number(patch.duration) || meta.duration;
+    if (patch?.bitrate !== undefined) {
+      meta.bitrate = patch.bitrate == null ? null : Math.round(Number(patch.bitrate));
+    }
+    if (patch?.format) meta.format = String(patch.format).toUpperCase();
+    if (patch?.contentType) meta.contentType = patch.contentType;
+
+    const dest = path.join(entry.dir, storedTrackName(index, meta.fileName));
+    await moveFile(tempPath, dest);
+    meta.size = stat.size;
+    meta.fileName = safeFileName(meta.fileName, `track-${index + 1}.mp3`);
+
+    manifest.totalBytes = manifest.tracks.reduce((sum, t) => sum + (t.size || 0), 0);
+    if (manifest.totalBytes > SHARE_MAX_PACKAGE_BYTES) {
+      await fs.unlink(dest).catch(() => undefined);
+      meta.size = 0;
+      throw new Error("Shared playlist package is too large (max ~700 MB).");
+    }
+    await this.writeManifest(entry.dir, manifest);
+    entry.totalBytes = manifest.totalBytes;
+    return manifest;
+  }
+
+  async finalize(code: string): Promise<ShareManifest> {
+    const loaded = await this.readManifest(code);
+    if (!loaded) throw new Error("Share session not found or expired.");
+    const {entry, manifest} = loaded;
+    if (manifest.complete) return manifest;
+    const missing = manifest.tracks.filter((t) => !t.size);
+    if (missing.length) {
+      throw new Error(
+        `Missing ${missing.length} track file(s). Upload all tracks before finalizing.`,
+      );
+    }
+    this.validateLimits(manifest.tracks.map((t) => ({duration: t.duration, size: t.size})));
+    manifest.complete = true;
+    manifest.totalBytes = manifest.tracks.reduce((sum, t) => sum + t.size, 0);
+    manifest.totalDuration = manifest.tracks.reduce((sum, t) => sum + t.duration, 0);
+    await this.writeManifest(entry.dir, manifest);
+    entry.totalBytes = manifest.totalBytes;
+    return manifest;
+  }
+
+  async abort(code: string): Promise<void> {
+    const loaded = await this.readManifest(code);
+    if (!loaded) return;
+    this.index.delete(loaded.manifest.code);
+    await fs.rm(loaded.entry.dir, {recursive: true, force: true}).catch(() => undefined);
+  }
+
+  /** Redeem-facing: only complete shares. */
+  async getManifest(code: string): Promise<ShareManifest | null> {
+    await this.purgeExpired();
+    const loaded = await this.readManifest(code);
+    if (!loaded) return null;
+    if (!loaded.manifest.complete) return null;
+    return loaded.manifest;
+  }
+
+  /** Uploader-facing: draft or complete. */
+  async getSession(code: string): Promise<ShareManifest | null> {
+    await this.purgeExpired();
+    const loaded = await this.readManifest(code);
+    return loaded?.manifest || null;
   }
 
   async openTrack(code: string, index: number): Promise<{meta: ShareTrackMeta; stream: ReturnType<typeof createReadStream>; absolutePath: string} | null> {
     const manifest = await this.getManifest(code);
     if (!manifest) return null;
     const meta = manifest.tracks.find((t) => t.index === index);
-    if (!meta) return null;
+    if (!meta || !meta.size) return null;
     const entry = this.index.get(manifest.code);
     if (!entry) return null;
-    const fileName = `track-${String(index).padStart(2, "0")}${path.extname(meta.fileName) || ".mp3"}`;
-    const absolutePath = path.join(entry.dir, fileName);
+    const absolutePath = path.join(entry.dir, storedTrackName(index, meta.fileName));
     if (!existsSync(absolutePath)) return null;
     return {meta, stream: createReadStream(absolutePath), absolutePath};
   }

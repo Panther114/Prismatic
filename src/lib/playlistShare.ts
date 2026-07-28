@@ -124,7 +124,7 @@ async function blobForTrack(track: Track): Promise<{blob: Blob; fileName: string
 export async function createPlaylistShare(
   playlist: Playlist,
   allTracks: Track[],
-  onProgress?: (message: string, ratio: number) => void,
+  onProgress?: (message: string, ratio: number, debug?: unknown) => void,
 ): Promise<ShareCreateResult> {
   const tracks = playlist.trackIds
     .map((id) => allTracks.find((t) => t.id === id))
@@ -138,9 +138,10 @@ export async function createPlaylistShare(
     const {listen} = await import("@tauri-apps/api/event");
     const {getConfiguredShareBase} = await import("./shareHost");
     onProgress?.("Starting share…", 0.02);
-    const unlisten = await listen<{message?: string}>("share-progress", (event) => {
+    const unlisten = await listen<{message?: string; progress?: number; debug?: unknown}>("share-progress", (event) => {
       const message = event.payload?.message;
-      if (message) onProgress?.(message, 0.4);
+      const progress = typeof event.payload?.progress === "number" ? event.payload.progress : 0.4;
+      if (message) onProgress?.(message, progress, event.payload?.debug);
     });
     try {
       const result = await invoke<{

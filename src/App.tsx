@@ -1222,13 +1222,21 @@ export default function App() {
       phase: "working",
       playlistName: playlist.name,
       status: "Preparing…",
+      progress: 0.02,
     });
     try {
-      const result = await createPlaylistShare(playlist, tracks, (message) => {
+      const result = await createPlaylistShare(playlist, tracks, (message, ratio, debug) => {
         setShareStatus(message);
         setShareDialog((current) =>
           current && current.phase === "working"
-            ? {...current, status: message}
+            ? {
+              ...current,
+              status: message,
+              progress: ratio,
+              debug: debug != null
+                ? JSON.stringify(debug).slice(0, 480)
+                : current.debug,
+            }
             : current,
         );
       });
@@ -1239,16 +1247,20 @@ export default function App() {
         code: result.code,
         expiresAt: result.expiresAt,
         status: "Done",
+        progress: 1,
       });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       setShareStatus("");
-      setShareDialog({
+      setShareDialog((current) => ({
         phase: "error",
         playlistName: playlist.name,
         error: message,
-      });
+        status: current?.phase === "working" ? current.status : undefined,
+        progress: current?.progress,
+        debug: current?.debug,
+      }));
     } finally {
       setShareBusy(false);
     }

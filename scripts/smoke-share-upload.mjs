@@ -1,7 +1,7 @@
 /**
- * Smoke-test playlist share against production host.
- * Creates a tiny synthetic "audio" part and expects a 4-digit code.
+ * Smoke-test per-track playlist share against production host.
  */
+import http from "node:http";
 import https from "node:https";
 
 const BASE = process.env.PRISMATIC_SHARE_BASE || "https://prismatic.up.railway.app";
@@ -9,27 +9,26 @@ const BASE = process.env.PRISMATIC_SHARE_BASE || "https://prismatic.up.railway.a
 function request(method, path, {headers = {}, body} = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, BASE);
-    const req = https.request(
+    const lib = url.protocol === "http:" ? http : https;
+    const req = lib.request(
       {
         hostname: url.hostname,
+        port: url.port || (url.protocol === "http:" ? 80 : 443),
         path: url.pathname + url.search,
         method,
         headers,
-        timeout: 90_000,
+        timeout: 120_000,
       },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          resolve({status: res.statusCode || 0, headers: res.headers, body: buf});
+          resolve({status: res.statusCode || 0, headers: res.headers, body: Buffer.concat(chunks)});
         });
       },
     );
     req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy(new Error("timeout"));
-    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
     if (body) req.write(body);
     req.end();
   });
@@ -44,43 +43,29 @@ async function wake() {
         if (json.ok) return json;
       }
     } catch {
-      // cold start
+      // cold
     }
-    await new Promise((r) => setTimeout(r, 1500 + i * 500));
+    await new Promise((r) => setTimeout(r, 1200 + i * 400));
   }
   throw new Error("health wake failed");
 }
 
-function buildMultipart() {
+function multipartOneFile(fields, fileField, fileName, fileBuf, contentType) {
   const boundary = "----PrismaticSmoke" + Date.now();
-  const fakeAudio = Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00SMOKE"); // not real mp3; server stores bytes as-is
-  const meta = [
-    {
-      fileName: "smoke-track.mp3",
-      title: "Smoke Track",
-      artist: "Prismatic CI",
-      album: "Smoke",
-      duration: 30,
-      bitrate: 128000,
-      format: "MP3",
-      contentType: "audio/mpeg",
-    },
-  ];
   const parts = [];
-  const push = (name, value, filename, type) => {
-    let head = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"`;
-    if (filename) head += `; filename="${filename}"`;
-    head += "\r\n";
-    if (type) head += `Content-Type: ${type}\r\n`;
-    head += "\r\n";
-    parts.push(Buffer.from(head, "utf8"));
-    parts.push(Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8"));
-    parts.push(Buffer.from("\r\n", "utf8"));
+  const pushField = (name, value) => {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+      "utf8",
+    ));
   };
-  push("name", "Smoke playlist");
-  push("tracks", JSON.stringify(meta));
-  push("audio", fakeAudio, "smoke-track.mp3", "audio/mpeg");
-  parts.push(Buffer.from(`--${boundary}--\r\n`, "utf8"));
+  for (const [k, v] of Object.entries(fields)) pushField(k, v);
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`,
+    "utf8",
+  ));
+  parts.push(fileBuf);
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"));
   const body = Buffer.concat(parts);
   return {
     body,
@@ -92,35 +77,71 @@ function buildMultipart() {
 }
 
 const health = await wake();
-console.log("health ok", health.role || health.mode, health.sharePublicUrl || BASE);
+console.log("health ok", health.role || health.mode);
 
-const {body, headers} = buildMultipart();
-const created = await request("POST", "/api/playlist-share", {headers, body});
-const text = created.body.toString("utf8");
-if (created.status !== 201 && created.status !== 200) {
-  console.error("create failed", created.status, text);
+const sessionBody = JSON.stringify({
+  name: "Smoke playlist",
+  tracks: [{
+    fileName: "smoke-track.mp3",
+    title: "Smoke Track",
+    artist: "Prismatic CI",
+    album: "Smoke",
+    duration: 30,
+    bitrate: 128000,
+    format: "MP3",
+    contentType: "audio/mpeg",
+  }],
+});
+const session = await request("POST", "/api/playlist-share/session", {
+  headers: {"Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(sessionBody))},
+  body: sessionBody,
+});
+if (session.status !== 201 && session.status !== 200) {
+  console.error("session failed", session.status, session.body.toString("utf8"));
   process.exit(1);
 }
-const json = JSON.parse(text);
-if (!/^\d{4}$/.test(json.code || "")) {
-  console.error("invalid code", json);
+const sessionJson = JSON.parse(session.body.toString("utf8"));
+const code = sessionJson.code;
+if (!/^\d{4}$/.test(code || "")) {
+  console.error("bad session code", sessionJson);
   process.exit(1);
 }
-console.log("created code", json.code, "expires", json.expiresAt);
+console.log("session code", code);
 
-const manifestRes = await request("GET", `/api/playlist-share/${json.code}`);
+const fakeAudio = Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00SMOKE");
+const {body, headers} = multipartOneFile(
+  {meta: JSON.stringify({fileName: "smoke-track.mp3", title: "Smoke Track", contentType: "audio/mpeg"})},
+  "audio",
+  "smoke-track.mp3",
+  fakeAudio,
+  "audio/mpeg",
+);
+const put = await request("PUT", `/api/playlist-share/${code}/tracks/0`, {headers, body});
+if (put.status < 200 || put.status >= 300) {
+  console.error("put track failed", put.status, put.body.toString("utf8"));
+  process.exit(1);
+}
+console.log("put track", put.body.toString("utf8").slice(0, 160));
+
+const fin = await request("POST", `/api/playlist-share/${code}/complete`);
+if (fin.status < 200 || fin.status >= 300) {
+  console.error("complete failed", fin.status, fin.body.toString("utf8"));
+  process.exit(1);
+}
+console.log("complete", fin.body.toString("utf8").slice(0, 160));
+
+const manifestRes = await request("GET", `/api/playlist-share/${code}`);
 if (manifestRes.status !== 200) {
   console.error("manifest failed", manifestRes.status, manifestRes.body.toString("utf8"));
   process.exit(1);
 }
 const manifest = JSON.parse(manifestRes.body.toString("utf8"));
-if (!manifest.tracks?.length) {
-  console.error("manifest empty", manifest);
+if (!manifest.complete || !manifest.tracks?.length) {
+  console.error("manifest incomplete", manifest);
   process.exit(1);
 }
-console.log("manifest tracks", manifest.tracks.length);
 
-const dl = await request("GET", `/api/playlist-share/${json.code}/tracks/0`);
+const dl = await request("GET", `/api/playlist-share/${code}/tracks/0`);
 if (dl.status !== 200 || dl.body.length < 4) {
   console.error("download failed", dl.status, dl.body.length);
   process.exit(1);

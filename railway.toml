@@ -9,7 +9,7 @@ buildCommand = "pnpm build:server"
 
 [deploy]
 # Share API only. Heap capped; PRISMATIC_CLOUD forces cloud stubs if anything misloads.
-startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=128 dist-server/cloud.mjs"
+startCommand = "NODE_ENV=production PRISMATIC_CLOUD=1 node --max-old-space-size=192 dist-server/cloud.mjs"
 # Longer timeout: first health after cold start can take several seconds.
 healthcheckPath = "/api/health"
 healthcheckTimeout = 120

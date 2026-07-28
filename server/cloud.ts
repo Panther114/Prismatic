@@ -32,10 +32,16 @@ function publicOrigin(): string | null {
 const app = express();
 const server = createHttpServer(app);
 
+// Single-track uploads must not hit Node's default 5‑minute requestTimeout.
+// Railway still enforces its own ~5‑min body limit per request — so we upload per-track.
+server.requestTimeout = 0; // disable Node request timeout (ms); 0 = no timeout
+server.headersTimeout = 15 * 60 * 1000;
+server.keepAliveTimeout = 120_000;
+
 // CORS: desktop (Tauri) and any future clients call this host cross-origin.
 app.use((request, response, next) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
   response.setHeader("Access-Control-Max-Age", "86400");
   if (request.method === "OPTIONS") {
@@ -89,6 +95,6 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 server.listen(port, host, () => {
   const origin = publicOrigin() || `http://${host === "0.0.0.0" ? "localhost" : host}:${port}`;
   console.log(`Prismatic share-only · ${origin}`);
-  console.log("Endpoints: GET /api/health · POST /api/playlist-share · GET /api/playlist-share/:code");
-  console.log("Enable Railway Serverless (App Sleeping) for cold-start idle RAM ≈ 0.");
+  console.log("Endpoints: health · session · PUT tracks/:i · complete · GET share/:code");
+  console.log("Per-track uploads (Railway 5‑min body limit). Enable Serverless for idle RAM ≈ 0.");
 });

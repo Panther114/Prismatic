@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Prismatic",
   "mainBinaryName": "Prismatic",
-  "version": "2.1.9",
+  "version": "2.1.10",
   "identifier": "app.prismatic.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",

@@ -1033,8 +1033,24 @@ fn share_http_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn emit_share_progress(app: Option<&AppHandle>, message: &str) {
+    emit_share_progress_ex(app, message, None, None);
+}
+
+fn emit_share_progress_ex(
+    app: Option<&AppHandle>,
+    message: &str,
+    progress: Option<f64>,
+    debug: Option<serde_json::Value>,
+) {
     if let Some(app) = app {
-        let _ = app.emit("share-progress", serde_json::json!({ "message": message }));
+        let mut payload = serde_json::json!({ "message": message });
+        if let Some(p) = progress {
+            payload["progress"] = serde_json::json!(p.clamp(0.0, 1.0));
+        }
+        if let Some(d) = debug {
+            payload["debug"] = d;
+        }
+        let _ = app.emit("share-progress", payload);
     }
 }
 
@@ -1109,7 +1125,7 @@ struct ShareTrackMetaOut {
     content_type: String,
 }
 
-/// Pack library tracks and POST multipart share package via native HTTP (not WebView).
+/// Per-track share upload (session → N PUTs → complete) — each request stays under Railway's 5‑min body limit.
 fn share_create_playlist_inner(
     app: Option<&AppHandle>,
     paths: &LibraryPaths,
@@ -1126,9 +1142,11 @@ fn share_create_playlist_inner(
         ));
     }
 
-    emit_share_progress(app, "Resolving playlist tracks…");
+    let started = SystemTime::now();
+    emit_share_progress_ex(app, "Resolving playlist tracks…", Some(0.02), None);
     let mut tracks = Vec::with_capacity(track_ids.len());
     let mut total_duration = 0.0_f64;
+    let mut total_bytes = 0u64;
     for id in &track_ids {
         let track = find_track(paths, id)?;
         let path = Path::new(&track.media_path);
@@ -1146,6 +1164,7 @@ fn share_create_playlist_inner(
             ));
         }
         total_duration += track.duration;
+        total_bytes += size;
         tracks.push(track);
     }
     if total_duration >= SHARE_MAX_DURATION_SEC {
@@ -1163,11 +1182,9 @@ fn share_create_playlist_inner(
         name.trim().to_owned()
     };
 
-    // Stream from disk (Part::file) — no full-library RAM copy / clone per retry.
     let mut meta: Vec<ShareTrackMetaOut> = Vec::with_capacity(tracks.len());
-    let mut file_specs: Vec<(PathBuf, String, String)> = Vec::with_capacity(tracks.len());
     for track in &tracks {
-        let path = PathBuf::from(&track.media_path);
+        let path = Path::new(&track.media_path);
         let ext = path
             .extension()
             .and_then(|value| value.to_str())
@@ -1191,96 +1208,237 @@ fn share_create_playlist_inner(
             duration: track.duration,
             bitrate: track.bitrate,
             format: track.format.clone(),
-            content_type: content_type.clone(),
+            content_type,
         });
-        file_specs.push((path, track.file_name.clone(), content_type));
     }
-    let meta_json = serde_json::to_string(&meta).map_err(display_err)?;
 
-    let mut last_err = String::new();
-    for attempt in 0..4 {
-        let upload_status = if attempt == 0 {
-            format!("Uploading {} tracks (streaming)…", tracks.len())
-        } else {
-            format!("Upload retry {}/4…", attempt + 1)
-        };
-        emit_share_progress(app, &upload_status);
-        let mut form = reqwest::blocking::multipart::Form::new()
-            .text("name", playlist_name.clone())
-            .text("tracks", meta_json.clone());
-        for (path, file_name, content_type) in &file_specs {
+    emit_share_progress_ex(
+        app,
+        "Creating share session…",
+        Some(0.06),
+        Some(serde_json::json!({
+            "phase": "session",
+            "tracks": tracks.len(),
+            "totalBytes": total_bytes,
+        })),
+    );
+    let session_body = serde_json::json!({
+        "name": playlist_name,
+        "tracks": meta,
+    });
+    let session_res = client
+        .post(format!("{base}/api/playlist-share/session"))
+        .json(&session_body)
+        .send()
+        .map_err(|e| format!("Share session request failed: {e}"))?;
+    let session_status = session_res.status();
+    let session_text = session_res.text().unwrap_or_default();
+    if !session_status.is_success() {
+        let err = serde_json::from_str::<serde_json::Value>(&session_text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_owned()))
+            .unwrap_or_else(|| format!("Share session failed ({})", session_status.as_u16()));
+        return Err(err);
+    }
+    let session: serde_json::Value =
+        serde_json::from_str(&session_text).map_err(display_err)?;
+    let code = session
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    if code.len() != 4 {
+        return Err("Share host returned an invalid session code.".into());
+    }
+    let expires_at = session
+        .get("expiresAt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    let mut uploaded_bytes = 0u64;
+    for (index, track) in tracks.iter().enumerate() {
+        let path = Path::new(&track.media_path);
+        let size = fs::metadata(path).map_err(display_err)?.len();
+        let progress = 0.08 + (index as f64 / tracks.len().max(1) as f64) * 0.85;
+        let mb = size as f64 / (1024.0 * 1024.0);
+        emit_share_progress_ex(
+            app,
+            &format!(
+                "Uploading {}/{}: {} ({:.1} MB)",
+                index + 1,
+                tracks.len(),
+                track.title,
+                mb
+            ),
+            Some(progress),
+            Some(serde_json::json!({
+                "phase": "track",
+                "index": index,
+                "of": tracks.len(),
+                "title": track.title,
+                "bytes": size,
+                "uploadedBytes": uploaded_bytes,
+                "totalBytes": total_bytes,
+                "code": code,
+                "elapsedMs": started.elapsed().map(|d| d.as_millis()).unwrap_or(0),
+            })),
+        );
+
+        let mut last_err = String::new();
+        let mut ok = false;
+        for attempt in 0..3 {
+            let track_started = SystemTime::now();
+            let meta_patch = serde_json::json!({
+                "fileName": track.file_name,
+                "title": track.title,
+                "artist": track.artist,
+                "album": track.album,
+                "duration": track.duration,
+                "bitrate": track.bitrate,
+                "format": track.format,
+                "contentType": meta[index].content_type,
+            });
             let part = reqwest::blocking::multipart::Part::file(path)
                 .map_err(display_err)?
-                .file_name(file_name.clone())
-                .mime_str(content_type)
+                .file_name(track.file_name.clone())
+                .mime_str(&meta[index].content_type)
                 .map_err(display_err)?;
-            form = form.part("audio", part);
-        }
+            let form = reqwest::blocking::multipart::Form::new()
+                .text("meta", meta_patch.to_string())
+                .part("audio", part);
 
-        match client
-            .post(format!("{base}/api/playlist-share"))
-            .multipart(form)
-            .send()
-        {
-            Ok(response) => {
-                let status = response.status();
-                let text = response.text().unwrap_or_default();
-                if status.is_success() {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&text).map_err(display_err)?;
-                    let code = value
-                        .get("code")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned();
-                    if code.len() != 4 {
-                        return Err("Share host returned an invalid code.".into());
+            match client
+                .put(format!("{base}/api/playlist-share/{code}/tracks/{index}"))
+                .multipart(form)
+                .send()
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text().unwrap_or_default();
+                    if status.is_success() {
+                        let elapsed = track_started
+                            .elapsed()
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        uploaded_bytes += size;
+                        emit_share_progress_ex(
+                            app,
+                            &format!(
+                                "Uploaded {}/{} ({elapsed} ms)",
+                                index + 1,
+                                tracks.len()
+                            ),
+                            Some(progress + 0.02),
+                            Some(serde_json::json!({
+                                "phase": "track-done",
+                                "index": index,
+                                "bytes": size,
+                                "elapsedMs": elapsed,
+                                "uploadedBytes": uploaded_bytes,
+                                "totalBytes": total_bytes,
+                            })),
+                        );
+                        ok = true;
+                        break;
                     }
-                    emit_share_progress(app, "Share code ready.");
-                    return Ok(ShareCreateResult {
-                        code,
-                        expires_at: value
-                            .get("expiresAt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_owned(),
-                        track_count: value
-                            .get("trackCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(tracks.len() as u64) as u32,
-                        total_duration: value
-                            .get("totalDuration")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(total_duration),
-                        name: value
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&playlist_name)
-                            .to_owned(),
-                    });
+                    last_err = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("error")
+                                .and_then(|e| e.as_str())
+                                .map(|s| s.to_owned())
+                        })
+                        .unwrap_or_else(|| format!("Track upload failed ({})", status.as_u16()));
+                    let code_n = status.as_u16();
+                    // Retry on 408/429/5xx (not deterministic 4xx validation errors)
+                    if code_n != 408
+                        && code_n != 429
+                        && code_n != 502
+                        && code_n != 503
+                        && code_n != 504
+                        && code_n < 500
+                    {
+                        let _ = client
+                            .delete(format!("{base}/api/playlist-share/{code}"))
+                            .send();
+                        return Err(last_err);
+                    }
                 }
-                last_err = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("error")
-                            .and_then(|e| e.as_str())
-                            .map(|s| s.to_owned())
-                    })
-                    .unwrap_or_else(|| format!("Share host error ({})", status.as_u16()));
-                let code = status.as_u16();
-                if code != 502 && code != 503 && code != 504 && code < 500 {
-                    return Err(last_err);
+                Err(error) => {
+                    last_err = format!("{error}");
                 }
             }
-            Err(error) => {
-                last_err = error.to_string();
+            if attempt + 1 < 3 {
+                thread::sleep(Duration::from_millis(800 + attempt as u64 * 600));
             }
         }
-        if attempt + 1 < 4 {
-            thread::sleep(Duration::from_millis(1200 + attempt as u64 * 800));
+        if !ok {
+            let _ = client
+                .delete(format!("{base}/api/playlist-share/{code}"))
+                .send();
+            return Err(format!(
+                "Failed uploading “{}” after retries: {last_err}",
+                track.title
+            ));
         }
     }
-    Err(format!("Share upload failed after retries: {last_err}"))
+
+    emit_share_progress_ex(app, "Finalizing share…", Some(0.96), None);
+    let complete_res = client
+        .post(format!("{base}/api/playlist-share/{code}/complete"))
+        .send()
+        .map_err(|e| format!("Finalize request failed: {e}"))?;
+    let complete_status = complete_res.status();
+    let complete_text = complete_res.text().unwrap_or_default();
+    if !complete_status.is_success() {
+        let err = serde_json::from_str::<serde_json::Value>(&complete_text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_owned()))
+            .unwrap_or_else(|| format!("Finalize failed ({})", complete_status.as_u16()));
+        return Err(err);
+    }
+    let complete: serde_json::Value =
+        serde_json::from_str(&complete_text).map_err(display_err)?;
+    let total_ms = started.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+    emit_share_progress_ex(
+        app,
+        &format!("Share code ready ({total_ms} ms total)"),
+        Some(1.0),
+        Some(serde_json::json!({
+            "phase": "done",
+            "code": code,
+            "tracks": tracks.len(),
+            "totalBytes": total_bytes,
+            "elapsedMs": total_ms,
+        })),
+    );
+
+    Ok(ShareCreateResult {
+        code: complete
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&code)
+            .to_owned(),
+        expires_at: complete
+            .get("expiresAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&expires_at)
+            .to_owned(),
+        track_count: complete
+            .get("trackCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(tracks.len() as u64) as u32,
+        total_duration: complete
+            .get("totalDuration")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(total_duration),
+        name: complete
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&playlist_name)
+            .to_owned(),
+    })
 }
 
 /// Runs share packing/upload off the UI thread so the share dialog stays responsive.

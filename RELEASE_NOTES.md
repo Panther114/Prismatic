@@ -1,20 +1,26 @@
-# Prismatic 2.1.9
+# Prismatic 2.1.10
 
-## Speed + freeze (share)
+## Fix: share upload vs Railway 5‑minute body limit
 
-**2.1.7 felt frozen and ~30s per track.** Two separate problems:
+Uploading an entire playlist in **one** multipart POST could not finish on typical home upload speeds before Railway (and Node’s default) cut the body at **5 minutes** — error:
 
-| Issue | Cause | Fix |
-|--------|--------|-----|
-| **Freeze** | Blocking Rust share command held the UI thread | **2.1.8+**: background `spawn_blocking` + live progress events |
-| **Slow download** | **Wake Railway on every track** + push each file through JS IPC twice | **2.1.9**: wake **once**; stream download **straight to library disk** |
-| **Slow upload** | Load every MP3 into RAM and **clone** for multipart | **2.1.9**: stream with `Part::file` from disk |
+`request or response body error for url (…/api/playlist-share)`
 
-## Also in 2.1.8+
+### New upload protocol (per track)
 
-- Edit/create playlist dialog above the player (Save not covered)
-- Faster CI release builds
+1. `POST /api/playlist-share/session` — metadata only  
+2. `PUT /api/playlist-share/:code/tracks/:index` — **one** audio file per request  
+3. `POST /api/playlist-share/:code/complete` — finalize for redeem  
+
+Each track finishes well under the 5‑minute ceiling; large playlists no longer fail deterministically.
+
+### Speed + UI
+
+- Streams each file from disk (`Part::file`)
+- Progress **bar** + percent + debug line (track index, bytes, elapsed)
+- Share still runs off the UI thread (no freeze)
+- Node `requestTimeout` disabled; heap raised to 192 MB on Railway
 
 ## Upgrade
 
-Install **2.1.9**. Do not stay on 2.1.7 for share.
+Install **2.1.10**. Redeploy Railway so the new share API is live before sharing from the new desktop build.

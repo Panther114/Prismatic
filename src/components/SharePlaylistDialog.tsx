@@ -6,6 +6,9 @@ export type ShareDialogState =
       phase: "working";
       playlistName: string;
       status: string;
+      /** 0–1 progress when known */
+      progress?: number;
+      debug?: string;
     }
   | {
       phase: "done";
@@ -13,12 +16,16 @@ export type ShareDialogState =
       code: string;
       expiresAt: string;
       status?: string;
+      progress?: number;
+      debug?: string;
     }
   | {
       phase: "error";
       playlistName: string;
       error: string;
       status?: string;
+      progress?: number;
+      debug?: string;
     };
 
 type Props = {
@@ -29,6 +36,7 @@ type Props = {
 export function SharePlaylistDialog({state, onClose}: Props) {
   const [copied, setCopied] = useState(false);
   const busy = state.phase === "working";
+  const progress = typeof state.progress === "number" ? Math.max(0, Math.min(1, state.progress)) : null;
 
   useEffect(() => {
     setCopied(false);
@@ -41,7 +49,6 @@ export function SharePlaylistDialog({state, onClose}: Props) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback: select the code text for manual copy
       const el = document.getElementById("playlist-share-code-value");
       if (el) {
         const range = document.createRange();
@@ -96,9 +103,20 @@ export function SharePlaylistDialog({state, onClose}: Props) {
               <LoaderCircle className="spin" size={22} />
               <span>{state.status || "Working…"}</span>
             </div>
+            <div className="playlist-share-bar" aria-hidden={progress == null}>
+              <div
+                className="playlist-share-bar-fill"
+                style={{width: `${Math.round((progress ?? 0.08) * 100)}%`}}
+              />
+            </div>
+            <p className="playlist-share-bar-label mono">
+              {progress != null ? `${Math.round(progress * 100)}%` : "…"}
+              {" · "}each track is a separate upload (Railway 5‑min body limit)
+            </p>
+            {state.debug ? <pre className="playlist-share-debug">{state.debug}</pre> : null}
             <p className="save-hint">
-              Packing tracks, waking the share server if it was asleep, then uploading original-quality audio.
-              First share after idle can take a few seconds extra.
+              Tracks upload one-by-one so large playlists do not hit the 5‑minute single-request cap.
+              First share after idle may take a few extra seconds to wake the server.
             </p>
           </>
         ) : null}
@@ -121,6 +139,7 @@ export function SharePlaylistDialog({state, onClose}: Props) {
             <p className="save-hint">
               Expires {new Date(state.expiresAt).toLocaleString()}. Tracks stay full quality.
             </p>
+            {state.debug ? <pre className="playlist-share-debug">{state.debug}</pre> : null}
           </>
         ) : null}
 
@@ -128,6 +147,7 @@ export function SharePlaylistDialog({state, onClose}: Props) {
           <>
             <p className="playlist-share-error">{state.error}</p>
             {state.status ? <p className="save-hint">Last step: {state.status}</p> : null}
+            {state.debug ? <pre className="playlist-share-debug">{state.debug}</pre> : null}
           </>
         ) : null}
 
