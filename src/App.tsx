@@ -43,6 +43,18 @@ import {appUpdater} from "./lib/appUpdater";
 
 const ACTIVE_STATUSES = new Set(["queued", "analyzing", "rendering"]);
 
+/** Cap cached waveforms (LRU) — each track waveform stays in memory forever otherwise. */
+const WAVEFORM_CACHE_LIMIT = 6;
+function rememberWaveform(cache: Map<string, number[]>, id: string, wave: number[]) {
+  cache.delete(id);
+  cache.set(id, wave);
+  while (cache.size > WAVEFORM_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 function TrackCover({track}: {track: Track}) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [track.id]);
@@ -134,7 +146,6 @@ export default function App() {
   const exportAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const togglePlaybackRef = useRef<() => Promise<void>>(async () => undefined);
-  const timeRafRef = useRef(0);
   const libraryGenerationRef = useRef(0);
   const cloudModeRef = useRef(false);
   const waveformCacheRef = useRef(new Map<string, number[]>());
@@ -142,7 +153,6 @@ export default function App() {
   const queueRef = useRef(queue);
   const prefetchRef = useRef<HTMLAudioElement | null>(null);
   const playAfterLoadRef = useRef(false);
-  const ensureAudioGraphRef = useRef(async () => undefined as void);
 
   queueRef.current = queue;
   const playerChromeVisible = view === "library" || view === "play" || view === "playlists";
@@ -352,12 +362,12 @@ export default function App() {
       setWaveform(cached);
     } else if (selected.clientOnly || selected.waveformUrl.startsWith("client-waveform:")) {
       const wave = clientLibrary.waveform(selected.id);
-      waveformCacheRef.current.set(selected.id, wave);
+      rememberWaveform(waveformCacheRef.current, selected.id, wave);
       setWaveform(wave);
     } else if (selected.waveformUrl.startsWith("tauri-waveform:")) {
       void api.waveform(selected.id)
         .then((wave) => {
-          waveformCacheRef.current.set(selected.id, wave);
+          rememberWaveform(waveformCacheRef.current, selected.id, wave);
           setWaveform(wave);
         })
         .catch(() => setWaveform([]));
@@ -369,7 +379,7 @@ export default function App() {
           return response.json() as Promise<number[]>;
         })
         .then((wave) => {
-          waveformCacheRef.current.set(selected.id, wave);
+          rememberWaveform(waveformCacheRef.current, selected.id, wave);
           setWaveform(wave);
         })
         .catch((cause: unknown) => {
@@ -379,7 +389,6 @@ export default function App() {
     if (shouldAutoplay && audio) {
       void (async () => {
         try {
-          await ensureAudioGraphRef.current();
           await audio.play();
         } catch {
           setPlaying(false);
@@ -428,29 +437,15 @@ export default function App() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const tick = () => {
-      setCurrentTime(audio.currentTime);
-      if (!audio.paused && !audio.ended && document.visibilityState === "visible") {
-        timeRafRef.current = requestAnimationFrame(tick);
-      }
-    };
-    const onPlay = () => {
-      cancelAnimationFrame(timeRafRef.current);
-      timeRafRef.current = requestAnimationFrame(tick);
-    };
-    const onPause = () => {
-      cancelAnimationFrame(timeRafRef.current);
-      setCurrentTime(audio.currentTime);
-    };
+    // UI time sync rides the native ~4Hz `timeupdate` event — no rAF loop, so
+    // the whole app tree is not re-rendered 60 times a second while playing.
+    const onPause = () => setCurrentTime(audio.currentTime);
     const onTimeUpdate = () => setCurrentTime(audio.currentTime);
-    audio.addEventListener("play", onPlay);
     audio.addEventListener("pause", onPause);
     audio.addEventListener("ended", onPause);
     audio.addEventListener("seeked", onPause);
     audio.addEventListener("timeupdate", onTimeUpdate);
     return () => {
-      cancelAnimationFrame(timeRafRef.current);
-      audio.removeEventListener("play", onPlay);
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("ended", onPause);
       audio.removeEventListener("seeked", onPause);
@@ -458,6 +453,9 @@ export default function App() {
     };
   }, [selected?.id]);
 
+  // WebAudio graph (analyser + MediaStream destination) is only built when
+  // Studio export needs it — normal playback goes straight through the
+  // hardware audio path to avoid the extra render thread and WebRTC buffers.
   const ensureAudioGraph = async () => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -480,13 +478,11 @@ export default function App() {
     }
     if (context.state === "suspended") await context.resume();
   };
-  ensureAudioGraphRef.current = ensureAudioGraph;
 
   const togglePlayback = async () => {
     const audio = audioRef.current;
     if (!audio || !selected) return;
     if (audio.paused) {
-      await ensureAudioGraph();
       await audio.play();
     } else {
       audio.pause();

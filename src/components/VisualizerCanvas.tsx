@@ -277,11 +277,21 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
       return total / Math.max(1, end - start);
     };
 
+    let staticFrameDrawn = false;
     const draw = (now: number) => {
       const current = propsRef.current;
-      const shouldRun = (current.active && pageVisible) || Boolean(current.exportSize);
+      // While playing the animation is frozen: capture one static frame at the
+      // play transition, then idle-poll until pause (no GPU/JS draw churn).
+      // Export mode (locked exportSize) keeps the full 60fps animation.
+      const shouldRun = (current.active && pageVisible && !current.playing) || Boolean(current.exportSize);
       if (!shouldRun) {
-        // Fully pause GPU work when tab/backgrounded or not on Play
+        if (current.playing && !staticFrameDrawn) {
+          renderFrame(now);
+          staticFrameDrawn = true;
+        } else if (!current.playing) {
+          staticFrameDrawn = false;
+        }
+        // Fully pause GPU work when tab/backgrounded, not on Play, or playing
         idleTimer = window.setTimeout(() => {
           animationFrame = requestAnimationFrame(draw);
         }, 500);
@@ -289,17 +299,23 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
       }
       // Keep export size locked every frame (exportSize can appear mid-session).
       if (current.exportSize) resize();
-      // Low quality: ~30fps while playing, ~12fps idle; high: 60/24
+      // Low quality: ~12fps idle; high: ~24fps. Export always runs at 60fps.
       const interval = current.exportSize
         ? 1000 / 60
         : current.quality === "low"
-          ? (current.playing ? 1000 / 30 : 1000 / 12)
-          : (current.playing ? 1000 / 60 : 1000 / 24);
+          ? 1000 / 12
+          : 1000 / 24;
       if (now - lastDraw < interval) {
         animationFrame = requestAnimationFrame(draw);
         return;
       }
       lastDraw = now;
+      renderFrame(now);
+      animationFrame = requestAnimationFrame(draw);
+    };
+
+    const renderFrame = (now: number) => {
+      const current = propsRef.current;
       if (activeAnalyser !== current.analyser) {
         activeAnalyser = current.analyser;
         frequencyBytes = activeAnalyser ? new Uint8Array(activeAnalyser.frequencyBinCount) : null;
@@ -465,7 +481,6 @@ export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(functi
       vignette.addColorStop(1, "rgba(0,0,0,.72)");
       context.fillStyle = vignette;
       context.fillRect(0, 0, w, h);
-      animationFrame = requestAnimationFrame(draw);
     };
     const onVisibility = () => {
       pageVisible = document.visibilityState === "visible";

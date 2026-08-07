@@ -21,7 +21,9 @@ The default library source ID remains `music`; watched-folder IDs retain the pre
 
 ## Playback lifecycle
 
-The single `<audio>` element is owned by the root application and never unmounts during navigation. `visibilitychange` pauses only animation, canvas rendering, polling, and high-frequency time updates. Foregrounding resynchronizes UI state from `audio.currentTime`. Audio contexts are resumed only when playback is active and never suspended merely because the page is hidden.
+The single `<audio>` element is owned by the root application and never unmounts during navigation. `visibilitychange` pauses only animation, canvas rendering, polling, and high-frequency time updates. Foregrounding resynchronizes UI state from `audio.currentTime`.
+
+Normal playback never touches the WebAudio graph: the audio element plays straight through the hardware path, and UI time sync rides the native ~4 Hz `timeupdate` event instead of a per-frame React loop. The analyser + `MediaStreamDestination` graph is built lazily only when Studio export needs the MediaRecorder fallback, so the WebRTC audio render thread stays off during listening. The Now Playing visualizer draws a single static frame when playback starts and resumes its ambient animation only while paused.
 
 The next item uses `preload="metadata"` so the player does not buffer or decode two tracks at once. Media Session handlers map OS/browser actions to the same queue.
 

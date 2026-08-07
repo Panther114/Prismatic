@@ -1,3 +1,22 @@
+# Prismatic 2.1.13
+
+## Quiet listening
+
+Much lighter on CPU and RAM while music plays.
+
+- **Frozen Now Playing backdrop during playback** — the visualizer draws a single static frame when a track starts and only animates while paused; Studio exports keep the full animation
+- **No WebAudio graph while listening** — the analyser/recording graph is only built when Studio export needs it, so the WebRTC audio thread stays off during normal playback
+- **Calmer UI clock** — time sync rides the native ~4 Hz event instead of re-rendering the whole app 60×/s
+- Waveform memory cache capped (LRU) so long listening sessions stop accumulating
+
+CPU while playing drops from ~8% to ~1%; RAM no longer grows with the waveform cache.
+
+## Upgrade
+
+Install 2.1.13. Library under `Music/Prismatic` is preserved.
+
+---
+
 # Prismatic 2.1.12
 
 ## Playlists, redesigned
