@@ -1,6 +1,6 @@
 {
   "name": "prismatic",
-  "version": "2.1.11",
+  "version": "2.1.12",
   "private": true,
   "author": "Prismatic",
   "description": "Prismatic — cinematic music visualizer & desktop player. Transfer playlists with zip export/import.",

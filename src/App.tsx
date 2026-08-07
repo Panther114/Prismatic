@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
   ArrowRight, Check, Clapperboard, CloudUpload, FolderOpen, FolderPlus, Library,
-  ListMusic, LoaderCircle, Menu, Music2, Play as PlayIcon, Plus, Save, Search, Settings, Square, Trash2, X,
+  ListMusic, LoaderCircle, Menu, Music2, Play as PlayIcon, Plus, Save, Search, Settings, Shuffle, Square, Trash2, X,
 } from "lucide-react";
 import {api, isTauri} from "./api";
 import {VisualizerCanvas, type VisualizerCanvasHandle} from "./components/VisualizerCanvas";
@@ -1211,6 +1211,15 @@ export default function App() {
     playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
   };
 
+  const playPlaylistTrack = (playlist: Playlist, trackId: string) => {
+    const ids = playlist.trackIds.filter((id) => tracks.some((t) => t.id === id));
+    if (!ids.length) {
+      setError("This playlist has no available tracks.");
+      return;
+    }
+    playQueue(ids, {startId: trackId, sourceLabel: playlist.name, autoplay: true});
+  };
+
   const exportZipPlaylist = async (playlist: Playlist) => {
     setZipBusy(true);
     setZipStatus("Preparing zip…");
@@ -1315,6 +1324,28 @@ export default function App() {
               <small>{pl.trackIds.length} tracks</small>
             </span>
           </button>
+          <div className="playlist-side-actions">
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={!pl.trackIds.length}
+              onClick={() => playPlaylist(pl, false)}
+              title="Play"
+              aria-label={`Play ${pl.name}`}
+            >
+              <PlayIcon size={13} fill="currentColor" />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={!pl.trackIds.length}
+              onClick={() => playPlaylist(pl, true)}
+              title="Shuffle"
+              aria-label={`Shuffle ${pl.name}`}
+            >
+              <Shuffle size={13} />
+            </button>
+          </div>
         </div>
       ))}
       {!loading && playlists.length === 0 && (
@@ -1447,6 +1478,7 @@ export default function App() {
               setPlaylists(playlistStore.list());
             }}
             onPlay={playPlaylist}
+            onPlayTrack={playPlaylistTrack}
             onExport={(pl) => void startPlaylistExport(pl)}
             onExportZip={isTauri ? (pl) => void exportZipPlaylist(pl) : undefined}
             onImportZip={isTauri ? () => void importZipPlaylist() : undefined}

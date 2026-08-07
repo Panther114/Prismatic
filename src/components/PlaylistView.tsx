@@ -1,6 +1,6 @@
 import {useEffect, useMemo, useState, type ComponentType, type DragEvent} from "react";
 import {
-  Archive, Check, Clapperboard, FileArchive, GripVertical, LoaderCircle, Pencil, Play, Plus, Shuffle, Trash2, X,
+  Archive, ArrowLeft, Check, Clapperboard, FileArchive, GripVertical, LoaderCircle, Pencil, Play, Plus, Shuffle, Trash2, X,
 } from "lucide-react";
 import type {Playlist, Track} from "../types";
 import {PlaylistCover} from "./PlaylistCover";
@@ -23,6 +23,7 @@ export type PlaylistViewProps = {
   onDelete: (id: string, name: string) => void;
   onUpdateTracks: (id: string, trackIds: string[]) => Promise<void>;
   onPlay: (playlist: Playlist, shuffle: boolean) => void;
+  onPlayTrack?: (playlist: Playlist, trackId: string) => void;
   onExport?: (playlist: Playlist) => void;
   onExportZip?: (playlist: Playlist) => void;
   onImportZip?: () => void;
@@ -42,6 +43,7 @@ export function PlaylistView({
   onDelete,
   onUpdateTracks,
   onPlay,
+  onPlayTrack,
   onExport,
   onExportZip,
   onImportZip,
@@ -57,7 +59,9 @@ export function PlaylistView({
   const [editIds, setEditIds] = useState<string[]>([]);
   const [dragId, setDragId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
   const byId = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
+  const openPlaylist = openId ? playlists.find((playlist) => playlist.id === openId) || null : null;
 
   const durationOf = (playlist: Playlist) =>
     playlist.trackIds.reduce((sum, id) => sum + (byId.get(id)?.duration || 0), 0);
@@ -147,49 +151,106 @@ export function PlaylistView({
 
       {zipStatus ? <p className="playlist-share-status" role="status">{zipStatus}</p> : null}
 
-      <div className="playlist-table custom-scroll">
-        {playlists.map((playlist) => (
-          <div key={playlist.id} className="playlist-table-row">
-            <PlaylistCover trackIds={playlist.trackIds} tracksById={byId} size={30} />
-            <div className="track-copy">
-              <strong>{playlist.name}</strong>
-              <small>{playlist.trackIds.length} tracks · {formatTime(durationOf(playlist))}</small>
+      {openPlaylist ? (
+        <div className="playlist-detail-view custom-scroll">
+          <button type="button" className="back-link" onClick={() => setOpenId(null)}>
+            <ArrowLeft size={15} />View all playlists
+          </button>
+          <div className="playlist-detail-head">
+            <div className="playlist-detail-title">
+              <PlaylistCover trackIds={openPlaylist.trackIds} tracksById={byId} size={56} />
+              <div>
+                <h2>{openPlaylist.name}</h2>
+                <p>{openPlaylist.trackIds.length} tracks · {formatTime(durationOf(openPlaylist))}</p>
+              </div>
             </div>
             <div className="playlist-row-actions dense">
-              <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, false)} title="Play" aria-label={`Play ${playlist.name}`}>
+              <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, false)} title="Play" aria-label={`Play ${openPlaylist.name}`}>
                 <Play size={13} fill="currentColor" />
               </button>
-              <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, true)} title="Shuffle" aria-label={`Shuffle ${playlist.name}`}>
+              <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, true)} title="Shuffle" aria-label={`Shuffle ${openPlaylist.name}`}>
                 <Shuffle size={13} />
               </button>
               {onExportZip ? (
                 <button
                   type="button"
                   className="icon-btn"
-                  disabled={!playlist.trackIds.length || zipBusy}
-                  onClick={() => onExportZip(playlist)}
+                  disabled={!openPlaylist.trackIds.length || zipBusy}
+                  onClick={() => onExportZip(openPlaylist)}
                   title="Export as zip"
-                  aria-label={`Export ${playlist.name} as zip`}
+                  aria-label={`Export ${openPlaylist.name} as zip`}
                 >
                   {zipBusy ? <LoaderCircle className="spin" size={13} /> : <Archive size={13} />}
                 </button>
               ) : null}
               {onExport ? (
-                <button type="button" className="icon-btn" disabled={!playlist.trackIds.length || exporting} onClick={() => onExport(playlist)} title="Export video" aria-label={`Export video ${playlist.name}`}>
+                <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length || exporting} onClick={() => onExport(openPlaylist)} title="Export video" aria-label={`Export video ${openPlaylist.name}`}>
                   {exporting ? <LoaderCircle className="spin" size={13} /> : <Clapperboard size={13} />}
                 </button>
               ) : null}
-              <button type="button" className="icon-btn" onClick={() => openEdit(playlist)} title="Edit" aria-label={`Edit ${playlist.name}`}>
+              <button type="button" className="icon-btn" onClick={() => openEdit(openPlaylist)} title="Edit" aria-label={`Edit ${openPlaylist.name}`}>
                 <Pencil size={13} />
               </button>
-              <button type="button" className="icon-btn danger" onClick={() => onDelete(playlist.id, playlist.name)} title="Delete" aria-label={`Delete ${playlist.name}`}>
+              <button type="button" className="icon-btn danger" onClick={() => onDelete(openPlaylist.id, openPlaylist.name)} title="Delete" aria-label={`Delete ${openPlaylist.name}`}>
                 <Trash2 size={13} />
               </button>
             </div>
           </div>
-        ))}
-        {!playlists.length ? <p className="empty-library">No playlists yet. Create one and select its tracks.</p> : null}
-      </div>
+          <div className="playlist-detail-list">
+            {openPlaylist.trackIds.map((id) => {
+              const track = byId.get(id);
+              if (!track) return null;
+              return (
+                <button
+                  type="button"
+                  key={id}
+                  className="playlist-detail-row"
+                  onClick={() => onPlayTrack?.(openPlaylist, id)}
+                  aria-label={`Play ${track.title} by ${track.artist}`}
+                >
+                  <TrackCover track={track} />
+                  <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
+                  <span className="song-album">{track.album || "Unknown album"}</span>
+                  <time>{formatTime(track.duration)}</time>
+                </button>
+              );
+            })}
+            {!openPlaylist.trackIds.length ? (
+              <p className="empty-library">This playlist has no tracks yet. Edit it and pick some from your library.</p>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className="playlist-tiles custom-scroll">
+          {playlists.map((playlist) => (
+            <div key={playlist.id} className="playlist-tile">
+              <div className="playlist-tile-art">
+                <button
+                  type="button"
+                  className="playlist-tile-open"
+                  onClick={() => setOpenId(playlist.id)}
+                  aria-label={`Open ${playlist.name}`}
+                >
+                  <PlaylistCover trackIds={playlist.trackIds} tracksById={byId} size={40} className="tile-cover" />
+                </button>
+                <span className="tile-actions">
+                  <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, false)} title="Play" aria-label={`Play ${playlist.name}`}>
+                    <Play size={14} fill="currentColor" />
+                  </button>
+                  <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, true)} title="Shuffle" aria-label={`Shuffle ${playlist.name}`}>
+                    <Shuffle size={14} />
+                  </button>
+                </span>
+              </div>
+              <button type="button" className="playlist-tile-copy" onClick={() => setOpenId(playlist.id)}>
+                <strong>{playlist.name}</strong>
+                <small>{playlist.trackIds.length} tracks · {formatTime(durationOf(playlist))}</small>
+              </button>
+            </div>
+          ))}
+          {!playlists.length ? <p className="empty-library">No playlists yet. Create one and select its tracks.</p> : null}
+        </div>
+      )}
 
       {editorOpen ? (
         <div className="confirm-overlay playlist-edit-overlay" role="presentation" onClick={closeEditor}>

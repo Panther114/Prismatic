@@ -13,6 +13,7 @@ A lightweight music player for **Windows** and **macOS**. Built for everyday lis
 - **Queue you control** — shuffle, repeat, reorder, resume after restart
 - **Now Playing** — audio-reactive visuals without a heavy desktop runtime
 - **Offline Studio** — export visuals on-device
+- **Playlists, redesigned** — mosaic-art card grid with play/shuffle on the cover, per-playlist song views, and sidebar quick play
 - **Playlist zip** — export a set as a zip of audio files; import zip to forge a playlist
 - **Desktop shell** — Tauri 2 on Windows/macOS (~2.5 MiB installer on Windows)
 - **Auto-update** — signed updates from GitHub Releases (2.1.2+)

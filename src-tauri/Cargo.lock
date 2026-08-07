@@ -2776,7 +2776,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "prismatic"
-version = "2.1.11"
+version = "2.1.12"
 dependencies = [
  "dirs",
  "lofty",
