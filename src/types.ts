@@ -50,7 +50,8 @@ export type SavedRender = {fileName: string; url: string};
 /** play = listen + live visuals; studio = export + render history (former visualize+renders) */
 export type View = "library" | "playlists" | "play" | "import" | "studio" | "settings";
 export type LibraryMode = "songs" | "albums" | "artists";
-export type LibrarySort = "title" | "artist" | "album" | "duration";
+/** Fields exposed by the library table's sortable column headers. */
+export type LibrarySort = "title" | "artist" | "album" | "bitrate" | "duration";
 
 export type Playlist = {
   id: string;

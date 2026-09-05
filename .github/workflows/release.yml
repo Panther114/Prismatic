@@ -55,6 +55,11 @@ jobs:
           if ("v$version" -ne "${{ github.ref_name }}") {
             throw "Tag ${{ github.ref_name }} does not match package version $version"
           }
+          $tauriVersion = node -p "require('./src-tauri/tauri.conf.json').version"
+          $cargoVersion = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = \"([^\"]+)\"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($tauriVersion -ne $version -or $cargoVersion -ne $version) {
+            throw "Release version drift: package=$version tauri=$tauriVersion cargo=$cargoVersion"
+          }
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
             throw "TAURI_SIGNING_PRIVATE_KEY secret is missing (required for updater signatures)"
           }
@@ -127,6 +132,12 @@ jobs:
           version=$(node -p "require('./package.json').version")
           if [ "v$version" != "${{ github.ref_name }}" ]; then
             echo "Tag ${{ github.ref_name }} does not match package version $version" >&2
+            exit 1
+          fi
+          tauri_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+          if [ "$tauri_version" != "$version" ] || [ "$cargo_version" != "$version" ]; then
+            echo "Release version drift: package=$version tauri=$tauri_version cargo=$cargo_version" >&2
             exit 1
           fi
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then

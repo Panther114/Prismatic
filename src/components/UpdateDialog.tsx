@@ -124,7 +124,10 @@ export function UpdateDialog({forceOpen = false, onClose}: Props) {
               {snap.phase === "ready" && "Update installed. Restarting Prismatic…"}
             </p>
             <div className="update-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}>
-              <div className="update-progress-bar" style={{width: `${percent ?? (snap.phase === "installing" || snap.phase === "ready" ? 100 : 12)}%`}} />
+              <div
+                className="update-progress-bar"
+                style={{transform: `scaleX(${Math.max(0, Math.min(100, percent ?? (snap.phase === "installing" || snap.phase === "ready" ? 100 : 12))) / 100})`}}
+              />
             </div>
             <div className="update-progress-meta mono">
               <span>{percent != null ? `${percent}%` : snap.phase === "downloading" ? "…" : "100%"}</span>

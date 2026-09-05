@@ -166,7 +166,7 @@ if (localFeatures) {
       const relativeParts = joined.split("/").filter(Boolean).map((part) => {
         try { return decodeURIComponent(part); } catch { return part; }
       });
-      const absolute = library.resolveMedia(sourceId, relativeParts);
+      const absolute = await library.resolveMedia(sourceId, relativeParts);
       if (!absolute) return response.status(404).json({error: "Media not found"});
       const stat = await fs.stat(absolute).catch(() => null);
       if (!stat?.isFile()) return response.status(404).json({error: "Media not found"});
@@ -205,7 +205,10 @@ if (localFeatures) {
       const track = await library.get(request.params.id);
       if (!track) return response.status(404).end();
       const cover = await library.cover(track);
-      if (!cover) return response.status(404).end();
+      // Missing embedded artwork is a normal track state; serve the bundled
+      // placeholder instead of emitting a noisy failed-image request in the
+      // browser console.
+      if (!cover) return response.redirect(302, "/music-note.svg");
       response.set({"Content-Type": cover.mime, "Cache-Control": "public, max-age=3600"}).send(cover.data);
     } catch (error) {
       next(error);
@@ -339,6 +342,9 @@ if (localFeatures) {
 
   app.patch("/api/playlists/:id", async (request, response, next) => {
     try {
+      if (request.body?.trackIds !== undefined && !Array.isArray(request.body.trackIds)) {
+        return response.status(400).json({error: "trackIds must be an array"});
+      }
       const updated = await playlists.update(request.params.id, {
         name: request.body?.name,
         trackIds: request.body?.trackIds,

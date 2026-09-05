@@ -71,6 +71,11 @@ export type ClientTrackExtras = {
 export class ClientLibrary {
   private tracks: Track[] = [];
   private extras = new Map<string, ClientTrackExtras>();
+  /** Serialize IndexedDB mutations per track so deletes/clears cannot be
+   * overtaken by an earlier fire-and-forget import/update write. */
+  private writes = new Map<string, Promise<void>>();
+  private mutationVersion = new Map<string, number>();
+  private clearInFlight: Promise<void> | null = null;
   private hydrated = false;
 
   list() {
@@ -145,7 +150,27 @@ export class ClientLibrary {
     return {...track};
   }
 
-  private async persist(id: string) {
+  private bumpMutation(id: string) {
+    const next = (this.mutationVersion.get(id) || 0) + 1;
+    this.mutationVersion.set(id, next);
+    return next;
+  }
+
+  private queuePersist(id: string) {
+    const version = this.bumpMutation(id);
+    const previous = this.writes.get(id) || Promise.resolve();
+    const clearBarrier = this.clearInFlight || Promise.resolve();
+    const pending = Promise.allSettled([previous, clearBarrier])
+      .then(() => this.persist(id, version));
+    this.writes.set(id, pending);
+    const cleanup = () => {
+      if (this.writes.get(id) === pending) this.writes.delete(id);
+    };
+    void pending.then(cleanup, cleanup);
+  }
+
+  private async persist(id: string, version: number) {
+    if (this.mutationVersion.get(id) !== version) return;
     const track = this.tracks.find((t) => t.id === id);
     const extras = this.extras.get(id);
     if (!track || !extras?.file) return;
@@ -179,6 +204,7 @@ export class ClientLibrary {
         cover,
         coverType,
       };
+      if (this.mutationVersion.get(id) !== version) return;
       await idbPutTrack(record);
     } catch (error) {
       console.warn("Client library persist failed", error);
@@ -243,7 +269,7 @@ export class ClientLibrary {
       };
       this.tracks.push(track);
       this.extras.set(id, {file, waveform, objectUrls});
-      void this.persist(id);
+      this.queuePersist(id);
       imported.push(file.name);
     }
     return {tracks: this.list(), imported, skipped};
@@ -254,28 +280,54 @@ export class ClientLibrary {
     if (!track) return null;
     track.title = update.title.trim() || track.title;
     track.artist = update.artist.trim() || track.artist;
-    void this.persist(id);
+    this.queuePersist(id);
     return {...track};
   }
 
   remove(id: string) {
+    const version = this.bumpMutation(id);
+    const previous = this.writes.get(id) || Promise.resolve();
+    const clearBarrier = this.clearInFlight || Promise.resolve();
     const extras = this.extras.get(id);
     if (extras) {
       for (const url of extras.objectUrls) URL.revokeObjectURL(url);
       this.extras.delete(id);
     }
     this.tracks = this.tracks.filter((track) => track.id !== id);
-    void idbDeleteTrack(id).catch(() => undefined);
+    const pending = Promise.allSettled([previous, clearBarrier])
+      .then(() => {
+        if (this.mutationVersion.get(id) !== version) return;
+        return idbDeleteTrack(id);
+      })
+      .catch(() => undefined);
+    this.writes.set(id, pending);
+    const cleanup = () => {
+      if (this.writes.get(id) === pending) this.writes.delete(id);
+    };
+    void pending.then(cleanup, cleanup);
     return this.list();
   }
 
   async clear() {
+    const ids = new Set([...this.tracks.map((track) => track.id), ...this.writes.keys()]);
+    for (const id of ids) this.bumpMutation(id);
     for (const extras of this.extras.values()) {
       for (const url of extras.objectUrls) URL.revokeObjectURL(url);
     }
     this.extras.clear();
     this.tracks = [];
-    await idbClearTracks();
+    const previousWrites = [...this.writes.values()];
+    const clear = Promise.allSettled(previousWrites)
+      .then(() => idbClearTracks())
+      .catch((error) => {
+        console.warn("Client library clear failed", error);
+      });
+    this.clearInFlight = clear;
+    try {
+      await clear;
+    } finally {
+      if (this.clearInFlight === clear) this.clearInFlight = null;
+    }
     return this.list();
   }
 }

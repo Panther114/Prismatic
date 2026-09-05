@@ -20,6 +20,7 @@ function newId() {
 
 export class PlaylistRepository {
   private cache: Playlist[] | null = null;
+  private cacheStamp: string | null = null;
 
   constructor(private readonly stateDirectory: string) {}
 
@@ -28,7 +29,9 @@ export class PlaylistRepository {
   }
 
   private async read(): Promise<Playlist[]> {
-    if (this.cache) return this.cache;
+    const stat = await fs.stat(this.filePath).catch(() => null);
+    const stamp = stat ? `${stat.mtimeMs}:${stat.size}` : null;
+    if (this.cache && this.cacheStamp === stamp) return this.cache;
     try {
       const raw = JSON.parse(await fs.readFile(this.filePath, "utf8")) as Playlist[];
       this.cache = Array.isArray(raw)
@@ -37,13 +40,16 @@ export class PlaylistRepository {
     } catch {
       this.cache = [];
     }
+    this.cacheStamp = stamp;
     return this.cache;
   }
 
   private async write(list: Playlist[]) {
-    this.cache = list;
     await fs.mkdir(this.stateDirectory, {recursive: true});
     await fs.writeFile(this.filePath, `${JSON.stringify(list, null, 2)}\n`, "utf8");
+    const stat = await fs.stat(this.filePath).catch(() => null);
+    this.cache = list;
+    this.cacheStamp = stat ? `${stat.mtimeMs}:${stat.size}` : null;
   }
 
   async list() {
@@ -71,7 +77,9 @@ export class PlaylistRepository {
     const updated: Playlist = {
       ...current,
       name: patch.name !== undefined ? (String(patch.name).trim() || current.name) : current.name,
-      trackIds: patch.trackIds !== undefined ? patch.trackIds.map(String) : current.trackIds,
+      trackIds: patch.trackIds !== undefined && Array.isArray(patch.trackIds)
+        ? patch.trackIds.map(String)
+        : current.trackIds,
       updatedAt: nowIso(),
     };
     const next = [...list];

@@ -22,11 +22,13 @@ import {exportPlaylistZip, importPlaylistZip} from "./lib/playlistZip";
 import {loadPlayerPrefs, loadPlayerPrefsLocal, savePlayerPrefs} from "./lib/playerPrefs";
 import {
   createQueue,
+  clearUpcoming,
   currentId,
   cycleRepeat,
   loadQueue,
   jumpTo,
   onTrackEnded,
+  pruneQueueToTrackIds,
   removeTrackFromQueue,
   reorderQueue,
   setRepeat,
@@ -34,9 +36,10 @@ import {
   setShuffle,
   skipNext,
   skipPrev,
+  syncQueueToTrackIds,
   type QueueState,
 } from "./lib/playbackQueue";
-import type {Playlist, RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
+import type {Playlist, QueueSource, RenderJob, ResolutionPreset, SavedRender, Track, View, WatchFolder} from "./types";
 import type {LibraryMode, LibrarySort} from "./types";
 import {setCompactPlayer} from "./lib/compactPlayer";
 import {appUpdater} from "./lib/appUpdater";
@@ -135,7 +138,7 @@ export default function App() {
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [queue, setQueue] = useState<QueueState>(() =>
-    createQueue([], {shuffle: initialPrefs.shuffle, repeat: initialPrefs.repeat, sourceLabel: "Library"}),
+    createQueue([], {shuffle: initialPrefs.shuffle, repeat: initialPrefs.repeat, sourceLabel: "Library", source: {kind: "library"}}),
   );
   const [autoplayNext, setAutoplayNext] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -151,6 +154,7 @@ export default function App() {
   const waveformCacheRef = useRef(new Map<string, number[]>());
   const lastVolumeRef = useRef(initialPrefs.volume || 0.86);
   const queueRef = useRef(queue);
+  const playlistsReadyRef = useRef(false);
   const prefetchRef = useRef<HTMLAudioElement | null>(null);
   const playAfterLoadRef = useRef(false);
 
@@ -162,6 +166,46 @@ export default function App() {
   const dirty = Boolean(selected && (title !== selected.title || artist !== selected.artist));
   const progress = selected?.duration ? Math.min(1, currentTime / selected.duration) : 0;
   const tracksById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
+
+  // Playlist edits (add/remove/reorder/rename) can happen while a playlist is
+  // playing. Keep the queue tied to its stable source id so the upcoming list
+  // updates on the next render instead of remaining a stale snapshot.
+  useEffect(() => {
+    if (!playlistsReadyRef.current) return;
+    setQueue((current) => {
+      // Older persisted queues only have a label. Treat a Library-labelled
+      // queue as the live library source so watched-folder/import changes are
+      // reflected without requiring the user to start playback again.
+      const source = current.source
+        || (current.sourceLabel === "Library" ? {kind: "library" as const} : undefined);
+      if (!source) return current;
+      if (source.kind === "library") {
+        return pruneQueueToTrackIds(current, tracks.map((track) => track.id));
+      }
+      const playlist = playlists.find((item) => item.id === source.playlistId);
+      if (!playlist) {
+        // A deleted source falls back to the library while preserving the
+        // current track when it is still available.
+        return syncQueueToTrackIds(current, tracks.map((track) => track.id), {kind: "library"});
+      }
+      const ids = playlist.trackIds.filter((id) => tracksById.has(id));
+      return syncQueueToTrackIds(current, ids, {
+        kind: "playlist",
+        playlistId: playlist.id,
+        name: playlist.name,
+      });
+    });
+  }, [playlists, tracks, tracksById]);
+
+  // If a source edit removed the selected/current item, move the player to the
+  // queue's successor. Preserve pause state; active playback opts into the
+  // normal load-and-autoplay path used by next/previous controls.
+  useEffect(() => {
+    const activeId = currentId(queue);
+    if (!activeId || activeId === selectedId || queue.order.includes(selectedId)) return;
+    if (playing) playAfterLoadRef.current = true;
+    setSelectedId(activeId);
+  }, [queue, selectedId, playing]);
   /**
    * Offline local/desktop: disk library is the only source of truth.
    * Cloud (Railway): merge browser IndexedDB imports.
@@ -218,7 +262,7 @@ export default function App() {
       if (q.order.length) return q;
       const fallback = createQueue(
         nextTracks.map((t) => t.id),
-        {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library"},
+        {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library", source: {kind: "library"}},
       );
       return loadQueue(nextTracks.map((track) => track.id), fallback);
     });
@@ -254,6 +298,10 @@ export default function App() {
       setPlaylists(list);
     } catch {
       setPlaylists([]);
+    } finally {
+      // Do not let the source-sync effect interpret the pre-hydration empty
+      // list as a deleted playlist.
+      playlistsReadyRef.current = true;
     }
     try {
       const meta = await api.libraryMeta();
@@ -519,7 +567,13 @@ export default function App() {
     }
   }, [goToTrack, selectedId]);
 
-  const playQueue = useCallback((trackIds: string[], options: {shuffle?: boolean; startId?: string; sourceLabel?: string; autoplay?: boolean} = {}) => {
+  const playQueue = useCallback((trackIds: string[], options: {
+    shuffle?: boolean;
+    startId?: string;
+    sourceLabel?: string;
+    source?: QueueSource;
+    autoplay?: boolean;
+  } = {}) => {
     setQueue((q) => {
       const shuffle = options.shuffle ?? q.shuffle;
       // Only pin a start track when the caller asks for one. Defaulting to trackIds[0]
@@ -529,6 +583,7 @@ export default function App() {
         repeat: q.repeat,
         startId: options.startId,
         sourceLabel: options.sourceLabel || "Library",
+        source: options.source || {kind: "library"},
       });
       const id = currentId(next);
       if (id) {
@@ -1099,6 +1154,7 @@ export default function App() {
         shuffle: queueRef.current.shuffle,
         repeat: queueRef.current.repeat,
         sourceLabel: "Library",
+        source: {kind: "library"},
       }));
       setQueueOpen(false);
       if (result.failedManagedFiles.length) {
@@ -1192,6 +1248,7 @@ export default function App() {
         repeat: q.repeat,
         startId: trackId,
         sourceLabel: "Library",
+        source: {kind: "library"},
       });
     });
     setSelectedId(trackId);
@@ -1204,7 +1261,12 @@ export default function App() {
       setError("This playlist has no available tracks.");
       return;
     }
-    playQueue(ids, {shuffle, sourceLabel: playlist.name, autoplay: true});
+    playQueue(ids, {
+      shuffle,
+      sourceLabel: playlist.name,
+      source: {kind: "playlist", playlistId: playlist.id, name: playlist.name},
+      autoplay: true,
+    });
   };
 
   const playPlaylistTrack = (playlist: Playlist, trackId: string) => {
@@ -1213,7 +1275,12 @@ export default function App() {
       setError("This playlist has no available tracks.");
       return;
     }
-    playQueue(ids, {startId: trackId, sourceLabel: playlist.name, autoplay: true});
+    playQueue(ids, {
+      startId: trackId,
+      sourceLabel: playlist.name,
+      source: {kind: "playlist", playlistId: playlist.id, name: playlist.name},
+      autoplay: true,
+    });
   };
 
   const exportZipPlaylist = async (playlist: Playlist) => {
@@ -1277,11 +1344,46 @@ export default function App() {
     selectTrack(trackId);
   };
 
+  const removeQueueTrack = (trackId: string) => {
+    const currentQueue = queueRef.current;
+    const wasCurrent = currentId(currentQueue) === trackId;
+    const wasPlaying = wasCurrent && playing;
+    const nextQueue = removeTrackFromQueue(currentQueue, trackId);
+    setQueue(nextQueue);
+    if (!wasCurrent) return;
+
+    const successor = currentId(nextQueue);
+    if (successor) {
+      if (wasPlaying) playAfterLoadRef.current = true;
+      setSelectedId(successor);
+      return;
+    }
+    playAfterLoadRef.current = false;
+    audioRef.current?.pause();
+    setPlaying(false);
+    setSelectedId("");
+  };
+
+  const clearQueueUpcoming = () => {
+    const nextQueue = clearUpcoming(queueRef.current);
+    setQueue(nextQueue);
+    if (!currentId(nextQueue)) {
+      playAfterLoadRef.current = false;
+      audioRef.current?.pause();
+      setPlaying(false);
+      setSelectedId("");
+    }
+  };
+
   const addTrackToPlaylist = async (playlistId: string, trackId: string) => {
     const playlist = playlists.find((item) => item.id === playlistId);
     if (!playlist || playlist.trackIds.includes(trackId)) return;
-    await playlistStore.update(playlistId, {trackIds: [...playlist.trackIds, trackId]});
-    setPlaylists(playlistStore.list());
+    try {
+      await playlistStore.update(playlistId, {trackIds: [...playlist.trackIds, trackId]});
+      setPlaylists(playlistStore.list());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   };
 
   const toggleCompact = async () => {
@@ -1408,6 +1510,7 @@ export default function App() {
             playlists={playlists}
             selectedId={selected?.id || ""}
             loading={loading}
+            importing={importing}
             removingId={removingId}
             query={libraryQuery}
             mode={libraryMode}
@@ -1671,7 +1774,7 @@ export default function App() {
                     <StatusMark job={job} />
                     <div><strong>{job.trackTitle}</strong><span>{job.stage}</span></div>
                     <span className="engine-label mono">{job.settings.resolution} · {job.settings.audioBitrate}k</span>
-                    <div className="progress-rail"><i style={{width: `${job.progress}%`}} /></div>
+                    <div className="progress-rail"><i style={{transform: `scaleX(${Math.max(0, Math.min(100, job.progress)) / 100})`}} /></div>
                     <span className="mono percent">{job.progress}%</span>
                     <div className="render-actions">
                       {running && (
@@ -1723,7 +1826,7 @@ export default function App() {
             <div className="section-label">Status</div>
             <div className="status-line"><StatusMark job={activeJob} /><strong>{activeJob?.stage || (selected ? "Ready to export" : "Waiting for audio")}</strong></div>
             <p>{activeJob?.error || (selected ? `${selected.format} · ${selected.folder}` : "Select a track in Library.")}</p>
-            {activeJob && <div className="status-progress"><i style={{width: `${activeJob.progress}%`}} /></div>}
+            {activeJob && <div className="status-progress"><i style={{transform: `scaleX(${Math.max(0, Math.min(100, activeJob.progress)) / 100})`}} /></div>}
           </section>
         )}
         {(view === "library" || view === "playlists" || view === "settings") && (
@@ -1743,22 +1846,22 @@ export default function App() {
         tracksById={tracksById}
         onClose={() => setQueueOpen(false)}
         onPlay={(id) => {
-          playAfterLoadRef.current = true;
           setQueue((current) => jumpTo(current, id));
+          if (id === selectedId) {
+            // Selecting the current row should resume a paused track. The
+            // selected-id effect does not run when the id is unchanged.
+            const audio = audioRef.current;
+            if (audio?.paused) {
+              void audio.play().catch(() => setPlaying(false));
+            }
+            return;
+          }
+          playAfterLoadRef.current = true;
           setSelectedId(id);
         }}
-        onRemove={(id) => setQueue((current) => removeTrackFromQueue(current, id))}
+        onRemove={removeQueueTrack}
         onMove={(from, to) => setQueue((current) => reorderQueue(current, from, to))}
-        onClearUpcoming={() => setQueue((current) => {
-          const order = current.order.slice(0, Math.max(0, current.index) + 1);
-          const retained = new Set(order);
-          return {
-            ...current,
-            order,
-            baseOrder: current.baseOrder.filter((id) => retained.has(id)),
-            updatedAt: new Date().toISOString(),
-          };
-        })}
+        onClearUpcoming={clearQueueUpcoming}
       />
 
       {playerChromeVisible ? <PersistentPlayer

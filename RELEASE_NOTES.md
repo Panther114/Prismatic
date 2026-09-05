@@ -1,3 +1,19 @@
+# Prismatic 2.1.14
+
+## Library controls and queue fidelity
+
+- **Compact sortable library table** — reclaim vertical space with column headers for song name, author, album, quality, and length. Click a header again to reverse its order; quality sorting handles both bits/s and kbps metadata.
+- **Low-quality warning** — known bitrates below 320 kbps are highlighted in orange.
+- **Reliable playlist menus** — Add to Playlist opens in a viewport-layered menu that flips above bottom rows and stays above the player.
+- **Live upcoming queue** — the queue follows playlist edits, rename/reorder changes, repeat-all cycles, and repeat-one self-loops without showing stale past items. Manual queue edits remain stable across refreshes.
+- **Safety and performance hardening** — guarded media paths against symlink escapes, made duplicate cleanup content-aware, serialized browser-library writes around deletes/clears, invalidated native waveform caches when files change, and avoided repeated empty-library scans.
+
+## Upgrade
+
+Install 2.1.14. Library under `Music/Prismatic` is preserved.
+
+---
+
 # Prismatic 2.1.13
 
 ## Quiet listening

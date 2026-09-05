@@ -67,6 +67,7 @@ design-qa.md
 .media/
 output/playwright/
 .playwright/
+.playwright-cli/
 
 # Optional native render cache (local only)
 .cache/

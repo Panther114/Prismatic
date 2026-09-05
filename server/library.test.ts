@@ -70,4 +70,39 @@ describe("library deletion safety", () => {
       library.dispose();
     }
   });
+
+  it("only purges same-size import clones when their contents match", async () => {
+    const {library, managed} = await fixture();
+    try {
+      const original = silentWav();
+      await writeFile(path.join(managed, "managed-abcde.wav"), original);
+      const different = Buffer.from(original);
+      different[45] ^= 0xff;
+      await writeFile(path.join(managed, "different.wav"), original);
+      await writeFile(path.join(managed, "different-abcde.wav"), different);
+
+      expect(await library.purgeImportDuplicates()).toBe(1);
+      await expect(readFile(path.join(managed, "managed-abcde.wav"))).rejects.toThrow();
+      expect(await readFile(path.join(managed, "different-abcde.wav"))).toHaveLength(original.length);
+    } finally {
+      library.dispose();
+    }
+  });
+
+  it("imports distinct same-size files instead of treating them as duplicates", async () => {
+    const {library, managed} = await fixture();
+    const source = path.join(managed, "..", "copy-source");
+    try {
+      await mkdir(source);
+      const different = Buffer.from(silentWav());
+      different[45] ^= 0xff;
+      await writeFile(path.join(source, "managed.wav"), different);
+
+      const result = await library.importFolderCopy(source);
+      expect(result.skipped).toBe(0);
+      expect(result.imported).toHaveLength(1);
+    } finally {
+      library.dispose();
+    }
+  });
 });

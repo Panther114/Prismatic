@@ -34,7 +34,7 @@ function normalize(raw: Partial<PlayerPrefs> | null | undefined): PlayerPrefs {
     visualizerQuality: raw?.visualizerQuality === "high" ? "high" : "low",
     resumeBehavior: raw?.resumeBehavior === "position" ? "position" : "track",
     libraryMode: raw?.libraryMode === "albums" || raw?.libraryMode === "artists" ? raw.libraryMode : "songs",
-    librarySort: raw?.librarySort === "artist" || raw?.librarySort === "album" || raw?.librarySort === "duration"
+    librarySort: raw?.librarySort === "artist" || raw?.librarySort === "album" || raw?.librarySort === "bitrate" || raw?.librarySort === "duration"
       ? raw.librarySort
       : "title",
     compactPlayer: Boolean(raw?.compactPlayer),

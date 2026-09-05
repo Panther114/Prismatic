@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
 import {execFile, spawn} from "node:child_process";
+import {createReadStream} from "node:fs";
 import {watch, type FSWatcher} from "node:fs";
 import {promises as fs} from "node:fs";
 import path from "node:path";
@@ -70,6 +71,16 @@ async function exactDuration(file: string, fallback: number) {
 }
 
 const AUDIO_FILE = /\.(mp3|wav|flac|m4a|aac|ogg|opus)$/i;
+
+async function fileDigest(file: string): Promise<string> {
+  const hash = createHash("sha256");
+  const stream = createReadStream(file);
+  return new Promise((resolve, reject) => {
+    stream.on("data", (chunk: Buffer | string) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
 
 /** Collect audio paths under `root`, including only folders up to `maxDepth` below root. */
 async function collectAudioFiles(rootDir: string, maxDepth: number): Promise<string[]> {
@@ -258,8 +269,9 @@ export class MusicLibrary {
 
   async addWatchFolder(rawPath: string): Promise<WatchFolder[]> {
     await this.ensureSettings();
-    const absolute = path.resolve(rawPath.trim());
-    if (!absolute) throw new Error("Folder path is required");
+    const trimmed = String(rawPath || "").trim();
+    if (!trimmed) throw new Error("Folder path is required");
+    const absolute = path.resolve(trimmed);
     const stat = await fs.stat(absolute).catch(() => null);
     if (!stat?.isDirectory()) throw new Error("Path is not a folder");
 
@@ -364,9 +376,13 @@ export class MusicLibrary {
 
   async list(): Promise<Track[]> {
     await this.ensureSettings();
-    if (!this.dirty && this.cachedList.length) return this.cachedList;
+    // Cache empty libraries too. Checking `cachedList.length` here forces a
+    // full filesystem walk on every request after the library is cleared (and
+    // makes an empty library disproportionately expensive to poll).
+    if (!this.dirty) return this.cachedList;
     if (this.listInflight) return this.listInflight;
 
+    const scanGeneration = this.generation;
     this.listInflight = (async () => {
       await fs.mkdir(this.musicDirectory, {recursive: true});
       const overrides = await this.readOverrides();
@@ -391,7 +407,10 @@ export class MusicLibrary {
 
       tracks.sort((a, b) => a.title.localeCompare(b.title));
       this.cachedList = tracks;
-      this.dirty = false;
+      // A watcher event may arrive while the scan is in progress. Keep the
+      // dirty bit set in that case so the debounced follow-up scan cannot
+      // return this now-stale snapshot.
+      if (this.generation === scanGeneration) this.dirty = false;
       return tracks;
     })();
 
@@ -423,7 +442,7 @@ export class MusicLibrary {
     return resolved;
   }
 
-  resolveMedia(sourceId: string, relativeParts: string[]) {
+  async resolveMedia(sourceId: string, relativeParts: string[]) {
     const source = this.sources().find((item) => item.id === sourceId);
     if (!source) return null;
     const relativePath = relativeParts.join("/");
@@ -431,7 +450,17 @@ export class MusicLibrary {
     const root = source.absolutePath.toLowerCase();
     const target = resolved.toLowerCase();
     if (target !== root && !target.startsWith(root + path.sep)) return null;
-    return resolved;
+    // The lexical check above blocks `..`, but a symlink inside a watched
+    // folder can still resolve outside the root. Canonicalize both paths
+    // before allowing the caller to stream the file.
+    const [realRoot, realTarget] = await Promise.all([
+      fs.realpath(source.absolutePath).catch(() => null),
+      fs.realpath(resolved).catch(() => null),
+    ]);
+    if (!realRoot || !realTarget) return null;
+    const relative = path.relative(realRoot, realTarget);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    return realTarget;
   }
 
   async cover(track: Track) {
@@ -488,7 +517,9 @@ export class MusicLibrary {
     };
     await fs.mkdir(this.stateDirectory, {recursive: true});
     await fs.writeFile(this.overridesPath, `${JSON.stringify(overrides, null, 2)}\n`, "utf8");
-    this.dirty = true;
+    // Bump the library generation as well as invalidating the in-memory list
+    // so another local client (web or desktop) notices metadata edits.
+    this.markDirty();
     return this.get(id);
   }
 
@@ -588,7 +619,8 @@ export class MusicLibrary {
   /**
    * Remove re-import clones left by older builds: when both `Song.mp3` and
    * `Song-<base36>.mp3` exist with the same byte size, delete the suffixed copy.
-   * Safe for names that legitimately end in -word (only removes if base file exists + same size).
+   * A matching size is only a candidate: content hashes must also match before
+   * the suffixed copy is removed, so distinct same-size songs are preserved.
    */
   async purgeImportDuplicates(): Promise<number> {
     const suffixRe = /^(.+)-[a-z0-9]{5,12}(\.[^.]+)$/i;
@@ -615,6 +647,11 @@ export class MusicLibrary {
       try {
         const [dupStat, baseStat] = await Promise.all([fs.stat(dupPath), fs.stat(basePath)]);
         if (!dupStat.isFile() || !baseStat.isFile() || dupStat.size !== baseStat.size) continue;
+        const [duplicateDigest, canonicalDigest] = await Promise.all([
+          fileDigest(dupPath),
+          fileDigest(basePath),
+        ]);
+        if (duplicateDigest !== canonicalDigest) continue;
         await fs.unlink(dupPath);
         nameSet.delete(name);
         removed += 1;
@@ -633,7 +670,9 @@ export class MusicLibrary {
    * Returns how many files were copied (originals are never modified).
    */
   async importFolderCopy(folderPath: string, maxDepth = 0): Promise<{imported: string[]; skipped: number}> {
-    const absolute = path.resolve(folderPath);
+    const trimmed = String(folderPath || "").trim();
+    if (!trimmed) throw new Error("Folder path is required");
+    const absolute = path.resolve(trimmed);
     const stat = await fs.stat(absolute).catch(() => null);
     if (!stat?.isDirectory()) throw new Error(`Not a folder: ${folderPath}`);
 
@@ -652,11 +691,14 @@ export class MusicLibrary {
       const base = path.basename(source).replace(/[^\p{L}\p{N}._ -]+/gu, "-") || `audio-${Date.now()}.mp3`;
       let destName = base;
       let dest = path.join(this.musicDirectory, destName);
-      // If name exists, only skip when same size (already imported); else uniquify.
+      // A same-size file is only an existing import when its contents match;
+      // distinct songs often share a byte length.
       const existing = await fs.stat(dest).catch(() => null);
       if (existing?.isFile()) {
         const srcStat = await fs.stat(source);
-        if (existing.size === srcStat.size) {
+        const sameContent = existing.size === srcStat.size
+          && await Promise.all([fileDigest(dest), fileDigest(source)]).then(([a, b]) => a === b);
+        if (sameContent) {
           skipped += 1;
           continue;
         }

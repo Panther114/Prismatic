@@ -9,6 +9,7 @@ use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
+    io::Read,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -188,6 +189,24 @@ fn ensure_managed_path<'a>(managed_root: &Path, target: &'a Path) -> Result<&'a 
 
 fn sha1_hex(input: &str) -> String {
     format!("{:x}", Sha1::digest(input.as_bytes()))
+}
+
+fn sha1_bytes(input: &[u8]) -> String {
+    format!("{:x}", Sha1::digest(input))
+}
+
+fn sha1_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(display_err)?;
+    let mut hasher = Sha1::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(display_err)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn source_id(path: &Path) -> String {
@@ -550,8 +569,15 @@ fn remove_track(
     }
     let mut config = settings(&paths);
     if !config.hidden.contains(&id) {
-        config.hidden.push(id);
+        config.hidden.push(id.clone());
         write_json(&paths.state_directory.join("settings.json"), &config)?;
+    }
+    // A removed track may be re-imported later with the same stable id. Drop
+    // any old metadata override so the new file does not inherit stale text.
+    let mut overrides: HashMap<String, Override> =
+        read_json(&paths.state_directory.join("library.json"));
+    if overrides.remove(&id).is_some() {
+        write_json(&paths.state_directory.join("library.json"), &overrides)?;
     }
     GENERATION.fetch_add(1, Ordering::Relaxed);
     scan_tracks(&paths)
@@ -626,7 +652,9 @@ fn copy_to_library(paths: &LibraryPaths, source: &Path) -> Result<Option<String>
     if destination.exists() {
         let source_size = fs::metadata(source).map_err(display_err)?.len();
         let destination_size = fs::metadata(&destination).map_err(display_err)?.len();
-        if source_size == destination_size {
+        let same_content = source_size == destination_size
+            && sha1_file(source)? == sha1_file(&destination)?;
+        if same_content {
             // Already present — still return the basename so re-imports can unhide.
             return Ok(Some(name.to_owned()));
         }
@@ -694,7 +722,9 @@ fn import_audio_bytes(
         let mut destination = paths.music_directory.join(safe);
         if destination.exists() {
             let existing = fs::metadata(&destination).map_err(display_err)?.len();
-            if existing == file.bytes.len() as u64 {
+            let same_content = existing == file.bytes.len() as u64
+                && sha1_file(&destination)? == sha1_bytes(&file.bytes);
+            if same_content {
                 imported_names.push(safe.to_owned());
                 continue;
             }
@@ -1150,7 +1180,9 @@ fn import_playlist_zip_inner(
             let mut buf = Vec::new();
             std::io::copy(&mut entry, &mut buf).map_err(display_err)?;
             let existing = fs::metadata(&destination).map_err(display_err)?.len();
-            if existing == buf.len() as u64 {
+            let same_content = existing == buf.len() as u64
+                && sha1_file(&destination)? == sha1_bytes(&buf);
+            if same_content {
                 imported_names.push(base.to_owned());
                 skipped += 1;
                 continue;
@@ -1225,15 +1257,24 @@ async fn import_playlist_zip(
 
 #[tauri::command]
 fn waveform(paths: State<LibraryPaths>, id: String) -> Result<Vec<f32>, String> {
+    let track = find_track(&paths, &id)?;
+    let metadata = fs::metadata(&track.media_path).map_err(display_err)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
     let cache_directory = paths.state_directory.join("waveforms");
-    let cache_path = cache_directory.join(format!("{id}.json"));
+    // Include file size and mtime so replacing a watched file at the same path
+    // cannot reuse a stale waveform from the previous audio contents.
+    let cache_path = cache_directory.join(format!("{id}-{}-{modified}.json", metadata.len()));
     if cache_path.is_file() {
         let cached: Vec<f32> = read_json(&cache_path);
         if !cached.is_empty() {
             return Ok(cached);
         }
     }
-    let track = find_track(&paths, &id)?;
     let peaks = decode_waveform(Path::new(&track.media_path), track.duration)?;
     fs::create_dir_all(cache_directory).map_err(display_err)?;
     write_json(&cache_path, &peaks)?;
