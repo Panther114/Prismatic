@@ -1,8 +1,9 @@
-import {useEffect, useMemo, useState, type ComponentType, type DragEvent} from "react";
+import {useDeferredValue, useEffect, useMemo, useState, type ComponentType, type DragEvent} from "react";
 import {
-  Archive, ArrowLeft, Check, Clapperboard, FileArchive, GripVertical, LoaderCircle, Pencil, Play, Plus, Shuffle, Trash2, X,
+  Archive, ArrowDown, ArrowLeft, ArrowUp, Check, Clapperboard, FileArchive, GripVertical, LoaderCircle, Pencil, Play, Plus, Search, Shuffle, Trash2, X,
 } from "lucide-react";
 import type {Playlist, Track} from "../types";
+import {CustomSelect} from "./CustomSelect";
 import {PlaylistCover} from "./PlaylistCover";
 
 const formatTime = (seconds: number) => {
@@ -13,6 +14,41 @@ const formatTime = (seconds: number) => {
 
 export const toggleTrackMembership = (trackIds: string[], trackId: string) =>
   trackIds.includes(trackId) ? trackIds.filter((id) => id !== trackId) : [...trackIds, trackId];
+
+export type PlaylistSort = "order" | "title" | "artist" | "album" | "duration";
+export type PlaylistSortDirection = "asc" | "desc";
+
+export function filterPlaylistTracks(trackIds: string[], tracksById: Map<string, Track>, query: string) {
+  const normalized = query.trim().toLocaleLowerCase();
+  return trackIds.flatMap((id, index) => {
+    const track = tracksById.get(id);
+    return track ? [{track, index}] : [];
+  }).filter(({track}) =>
+    !normalized
+    || track.title.toLocaleLowerCase().includes(normalized)
+    || track.artist.toLocaleLowerCase().includes(normalized)
+    || track.album.toLocaleLowerCase().includes(normalized),
+  );
+}
+
+export function sortPlaylistTracks(
+  rows: ReturnType<typeof filterPlaylistTracks>,
+  sort: PlaylistSort,
+  direction: PlaylistSortDirection,
+) {
+  return [...rows].sort((a, b) => {
+    if (sort === "order") return a.index - b.index;
+    const aValue = sort === "duration" ? a.track.duration : a.track[sort].trim();
+    const bValue = sort === "duration" ? b.track.duration : b.track[sort].trim();
+    const aMissing = typeof aValue === "string" ? !aValue : !Number.isFinite(aValue);
+    const bMissing = typeof bValue === "string" ? !bValue : !Number.isFinite(bValue);
+    if (aMissing !== bMissing) return aMissing ? 1 : -1;
+    const result = typeof aValue === "number" && typeof bValue === "number"
+      ? aValue - bValue
+      : String(aValue).localeCompare(String(bValue), undefined, {numeric: true, sensitivity: "base"});
+    return result === 0 ? a.index - b.index : direction === "asc" ? result : -result;
+  }).map(({track}) => track);
+}
 
 export type PlaylistViewProps = {
   playlists: Playlist[];
@@ -60,8 +96,23 @@ export function PlaylistView({
   const [dragId, setDragId] = useState<string | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [playlistQuery, setPlaylistQuery] = useState("");
+  const [playlistSort, setPlaylistSort] = useState<PlaylistSort>("order");
+  const [playlistSortDirection, setPlaylistSortDirection] = useState<PlaylistSortDirection>("asc");
   const byId = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
   const openPlaylist = openId ? playlists.find((playlist) => playlist.id === openId) || null : null;
+  const deferredPlaylistQuery = useDeferredValue(playlistQuery.trim().toLocaleLowerCase());
+  const playlistTracks = useMemo(() => {
+    if (!openPlaylist) return [];
+    const filtered = filterPlaylistTracks(openPlaylist.trackIds, byId, deferredPlaylistQuery);
+    return sortPlaylistTracks(filtered, playlistSort, playlistSortDirection);
+  }, [byId, deferredPlaylistQuery, openPlaylist, playlistSort, playlistSortDirection]);
+
+  useEffect(() => {
+    setPlaylistQuery("");
+    setPlaylistSort("order");
+    setPlaylistSortDirection("asc");
+  }, [openId]);
 
   const durationOf = (playlist: Playlist) =>
     playlist.trackIds.reduce((sum, id) => sum + (byId.get(id)?.duration || 0), 0);
@@ -196,10 +247,59 @@ export function PlaylistView({
               </button>
             </div>
           </div>
+          <div className="playlist-detail-controls">
+            <label className="library-search-v2 playlist-search-v2">
+              <Search size={14} aria-hidden="true" />
+              <input
+                value={playlistQuery}
+                onChange={(event) => setPlaylistQuery(event.target.value)}
+                placeholder="Search this playlist"
+                aria-label="Search this playlist"
+              />
+              {playlistQuery ? (
+                <button type="button" onClick={() => setPlaylistQuery("")} aria-label="Clear playlist search"><X size={14} /></button>
+              ) : null}
+            </label>
+            <CustomSelect
+              className="library-sort-select playlist-sort-select"
+              ariaLabel="Sort playlist tracks"
+              value={playlistSort}
+              onChange={(value) => {
+                setPlaylistSort(value as PlaylistSort);
+                setPlaylistSortDirection("asc");
+              }}
+              options={[
+                {value: "order", label: "Playlist order"},
+                {value: "title", label: "Title"},
+                {value: "artist", label: "Artist"},
+                {value: "album", label: "Album"},
+                {value: "duration", label: "Duration"},
+              ]}
+            />
+            <button
+              type="button"
+              className="playlist-sort-direction"
+              disabled={playlistSort === "order"}
+              onClick={() => setPlaylistSortDirection((current) => current === "asc" ? "desc" : "asc")}
+              aria-label={`Sort ${playlistSortDirection === "asc" ? "descending" : "ascending"}`}
+              title={playlistSort === "order" ? "Choose a sort field to change order" : `Sort ${playlistSortDirection === "asc" ? "descending" : "ascending"}`}
+            >
+              {playlistSortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
+              <span>{playlistSortDirection === "asc" ? "Ascending" : "Descending"}</span>
+            </button>
+            <span className="playlist-result-count" aria-live="polite">
+              {deferredPlaylistQuery ? `${playlistTracks.length} of ${openPlaylist.trackIds.length} tracks` : `${playlistTracks.length} tracks`}
+            </span>
+          </div>
+          <div className="playlist-detail-columns" aria-hidden="true">
+            <span />
+            <span>Song</span>
+            <span className="song-album">Album</span>
+            <span>Length</span>
+          </div>
           <div className="playlist-detail-list">
-            {openPlaylist.trackIds.map((id) => {
-              const track = byId.get(id);
-              if (!track) return null;
+            {playlistTracks.map((track) => {
+              const id = track.id;
               return (
                 <button
                   type="button"
@@ -215,6 +315,11 @@ export function PlaylistView({
                 </button>
               );
             })}
+            {!playlistTracks.length && openPlaylist.trackIds.length > 0 ? (
+              <p className="empty-library playlist-filter-empty">
+                {deferredPlaylistQuery ? "No tracks match your search. Clear the search to see the full playlist." : "This playlist’s tracks are not in your library."}
+              </p>
+            ) : null}
             {!openPlaylist.trackIds.length ? (
               <p className="empty-library">This playlist has no tracks yet. Edit it and pick some from your library.</p>
             ) : null}

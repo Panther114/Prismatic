@@ -1,3 +1,18 @@
+# Prismatic 2.1.15
+
+## Now Playing, renewed
+
+- **Audio-reactive stage** — the visible Now Playing view samples a small analyser and renders its low-resolution background at 12 fps while music plays. Paused playback holds a single frame, and the canvas stays idle outside that view.
+- **Full-face record** — album art fills the spinning disc, with engraved grooves, a glassy highlight, and a larger center spindle hole.
+- **Playlist controls** — search playlist tracks by title, artist, or album; sort by playlist order, title, artist, album, or duration in either direction.
+- **Full-bleed missing art** — replaced the undersized note with a custom Prismatic cover tile across track and collection artwork.
+
+## Upgrade
+
+Install 2.1.15. Library under `Music/Prismatic` is preserved.
+
+---
+
 # Prismatic 2.1.14
 
 ## Library controls and queue fidelity

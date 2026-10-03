@@ -1,6 +1,6 @@
 [package]
 name = "prismatic"
-version = "2.1.14"
+version = "2.1.15"
 description = "A lightweight cinematic music player and visual exporter"
 authors = ["Prismatic"]
 edition = "2021"

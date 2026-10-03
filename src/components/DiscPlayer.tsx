@@ -12,13 +12,19 @@ export function DiscPlayer({track, playing, currentTime, progress}: Props) {
   const [coverFailed, setCoverFailed] = useState(false);
   useEffect(() => setCoverFailed(false), [track.id]);
   const remaining = Math.max(0, track.duration - currentTime);
+  const coverUrl = coverFailed || track.coverUrl.includes("music-note.") ? "/music-note.svg" : track.coverUrl;
   return (
     <div className="disc-player" aria-label={`${track.title} by ${track.artist}`}>
       <div className={`vinyl-shell ${playing ? "playing" : ""}`}>
-        <div className="vinyl-grooves" />
-        <div className="cover-label">
-          {!coverFailed && <img src={track.coverUrl} alt={`${track.title} cover`} onError={() => setCoverFailed(true)} />}
-          {coverFailed && <img className="fallback-note" src="/music-note.svg" alt="Generic music artwork" />}
+        <div className="vinyl-face">
+          <img
+            className={`vinyl-art ${coverUrl.includes("music-note.") ? "fallback-note" : ""}`}
+            src={coverUrl}
+            alt={`${track.title} cover`}
+            onError={() => setCoverFailed(true)}
+          />
+          <div className="vinyl-grooves" />
+          <div className="vinyl-gloss" />
         </div>
         <i className="spindle" />
       </div>

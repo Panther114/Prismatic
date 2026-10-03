@@ -70,7 +70,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .track-row time { color: #9299a5; font-family: "JetBrains Mono", monospace; font-size: 9px; }
 .track-cover { display: grid; place-items: center; width: 30px; height: 30px; overflow: hidden; border-radius: 3px; background: #0e131c; flex: 0 0 30px; }
 .track-cover img { width: 100%; height: 100%; object-fit: cover; }
-.track-cover img.fallback-note { width: 62%; height: 62%; object-fit: contain; opacity: .9; filter: invert(1) drop-shadow(0 0 6px rgba(19,184,255,.55)); }
+.track-cover img.fallback-note { width: 100%; height: 100%; object-fit: cover; opacity: 1; filter: none; }
 .empty-library { margin: 12px 14px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .library-view { display: flex; flex-direction: column; min-height: 0; height: 100%; padding: 16px 22px 12px !important; }
 .library-view .utility-heading { flex: 0 0 auto; max-width: none; }
@@ -104,15 +104,15 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .stage { position: relative; min-height: 0; flex: 1; overflow: hidden; border-bottom: 1px solid var(--line); }
 .visualizer-canvas { display: block; width: 100%; height: 100%; }
 .disc-player { position: absolute; z-index: 2; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4% 8% 3%; pointer-events: none; text-align: center; }
-.vinyl-shell { position: relative; width: clamp(190px, 29vmin, 330px); aspect-ratio: 1; flex: 0 0 auto; border-radius: 50%; background: radial-gradient(circle at 50% 50%, #14131b 0 7%, #050509 7.5% 29%, #17141e 29.5% 30.5%, #06070b 31% 58%, #121018 58.5% 59.5%, #05060a 60% 100%); box-shadow: 0 0 0 1px rgba(255,255,255,.11), 0 0 0 4px rgba(112,71,255,.22), 0 0 38px rgba(19,184,255,.19), 0 0 82px rgba(241,44,191,.13); animation: vinyl-spin 13s linear infinite; animation-play-state: paused; }
+.vinyl-shell { position: relative; width: clamp(220px, 37vmin, 380px); aspect-ratio: 1; flex: 0 0 auto; border-radius: 50%; background: transparent; box-shadow: 0 0 0 1px rgba(255,255,255,.2), 0 0 0 5px rgba(112,71,255,.22), 0 0 46px rgba(19,184,255,.24), 0 0 100px rgba(241,44,191,.19); animation: vinyl-spin 9s linear infinite; animation-play-state: paused; }
 .vinyl-shell.playing { animation-play-state: running; }
-.vinyl-shell::after { content: ""; position: absolute; inset: 2.3%; border-radius: 50%; border: 1px solid rgba(112,71,255,.44); box-shadow: inset 0 0 28px rgba(255,255,255,.05), 0 0 14px rgba(112,71,255,.38); }
-.vinyl-grooves { position: absolute; inset: 7%; border-radius: 50%; opacity: .72; background: repeating-radial-gradient(circle at center, transparent 0 4px, rgba(210,215,228,.07) 4.5px 5px); }
-.cover-label { position: absolute; z-index: 2; inset: 29%; display: grid; place-items: center; overflow: hidden; border: 2px solid rgba(243,240,232,.78); border-radius: 50%; background: radial-gradient(circle at 28% 24%, #ff8b43, #df287d 36%, #512db7 73%, #0e1735); box-shadow: 0 0 22px rgba(241,44,191,.38); }
-.cover-label img { width: 100%; height: 100%; object-fit: cover; }
-.cover-label span { font-family: "Barlow Condensed", sans-serif; font-size: clamp(42px, 7vmin, 78px); font-weight: 700; }
-.cover-label img.fallback-note { width: 76%; height: 76%; object-fit: contain; opacity: .94; filter: invert(1) drop-shadow(0 0 9px rgba(19,184,255,.74)) drop-shadow(0 0 18px rgba(112,71,255,.46)); }
-.spindle { position: absolute; z-index: 3; left: 50%; top: 50%; width: 8px; height: 8px; border-radius: 50%; background: #f3f0e8; box-shadow: 0 0 9px #13b8ff; translate: -50% -50%; }
+.vinyl-face { position: absolute; z-index: 0; inset: 0; overflow: hidden; border-radius: 50%; -webkit-mask-image: radial-gradient(circle, transparent 0 5%, #fff 5.7% 100%); mask-image: radial-gradient(circle, transparent 0 5%, #fff 5.7% 100%); pointer-events: none; }
+.vinyl-art { position: absolute; z-index: 0; inset: 0; display: block; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+.vinyl-shell::after { content: ""; position: absolute; z-index: 3; inset: 2.3%; border-radius: 50%; border: 1px solid rgba(224,235,255,.36); box-shadow: 0 0 18px rgba(112,71,255,.52); pointer-events: none; }
+.vinyl-grooves { position: absolute; z-index: 1; inset: 5.5%; border: 1px solid rgba(255,255,255,.13); border-radius: 50%; opacity: .86; background: repeating-radial-gradient(circle at center, transparent 0 4px, rgba(225,235,255,.11) 4.35px 4.8px, rgba(8,11,18,.1) 5.1px 5.6px); box-shadow: inset 0 0 40px rgba(4,7,14,.24); pointer-events: none; }
+.vinyl-art.fallback-note ~ .vinyl-grooves { opacity: .38; box-shadow: none; }
+.vinyl-gloss { position: absolute; z-index: 2; inset: 0; border-radius: 50%; background: radial-gradient(ellipse at 28% 18%, rgba(255,255,255,.23), transparent 31%), radial-gradient(ellipse at 78% 80%, rgba(21,187,255,.16), transparent 38%), linear-gradient(128deg, rgba(255,255,255,.12), transparent 34% 61%, rgba(255,255,255,.08)); mix-blend-mode: screen; pointer-events: none; }
+.spindle { position: absolute; z-index: 4; left: 50%; top: 50%; width: 10%; min-width: 21px; aspect-ratio: 1; border: 1px solid rgba(240,244,255,.82); border-radius: 50%; background: transparent; box-shadow: 0 0 0 3px rgba(4,7,13,.42), 0 0 0 4px rgba(240,244,255,.22), 0 1px 8px rgba(0,0,0,.62); translate: -50% -50%; }
 .now-playing-copy { width: min(760px, 86%); margin-top: clamp(18px, 2.4vh, 30px); text-shadow: 0 3px 20px #05070c; }
 .now-playing-copy > span { color: #aeb5c3; font-family: "JetBrains Mono", monospace; font-size: 10px; letter-spacing: .22em; text-transform: uppercase; }
 .now-playing-copy h1 { overflow: hidden; margin: 7px 0 0; color: var(--text); font-family: "Barlow Condensed", sans-serif; font-size: clamp(36px, 5.2vmin, 66px); font-weight: 700; line-height: .94; letter-spacing: -.018em; text-overflow: ellipsis; white-space: nowrap; }
@@ -292,6 +292,15 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .playlist-detail-title .playlist-cover { border-radius: 6px; }
 .playlist-detail-title h2 { margin: 0; font-family: "Barlow Condensed", sans-serif; font-size: 26px; font-weight: 600; letter-spacing: .01em; }
 .playlist-detail-title p { margin: 2px 0 0; color: #7f8997; font-size: 11px; }
+.playlist-detail-controls { display: flex; align-items: center; gap: 8px; margin: 0 6px 10px; }
+.playlist-detail-controls .playlist-search-v2 { width: min(340px, 100%); flex: 1 1 240px; height: 34px; }
+.playlist-sort-select { min-width: 132px; }
+.playlist-sort-direction { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 34px; padding: 0 9px; border: 1px solid #29313d; border-radius: 7px; background: #0a0f16; color: #b9c3d1; font-size: 10px; white-space: nowrap; cursor: pointer; transition: color .15s ease, border-color .15s ease, background-color .15s ease; }
+.playlist-sort-direction:hover:not(:disabled) { border-color: #536278; background: #111923; color: #f2f4f8; }
+.playlist-sort-direction:disabled { color: #778292; opacity: .58; cursor: default; }
+.playlist-result-count { margin-left: auto; color: #788495; font-family: "JetBrains Mono", monospace; font-size: 9px; white-space: nowrap; }
+.playlist-detail-columns { display: grid; grid-template-columns: 28px minmax(110px, 1.2fr) minmax(90px, 1fr) minmax(64px, auto); align-items: center; gap: 8px; margin: 0 7px 4px; padding: 0 0 6px; border-bottom: 1px solid #1b222d; color: #7f8997; font-family: "JetBrains Mono", monospace; font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
+.playlist-detail-columns > :last-child { text-align: right; }
 .playlist-detail-list { display: flex; flex-direction: column; gap: 1px; }
 .playlist-detail-row {
   display: grid;
@@ -308,9 +317,11 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   cursor: pointer;
 }
 .playlist-detail-row:hover { background: #10151e; }
+.playlist-detail-row:focus-visible { outline: 1px solid #62c9ec; outline-offset: -1px; }
 .playlist-detail-row .track-cover { width: 28px; height: 28px; flex: 0 0 28px; }
 .playlist-detail-row .song-album { font-size: 10px; }
 .playlist-detail-row time { color: #9299a5; font-family: "JetBrains Mono", monospace; font-size: 10px; text-align: right; white-space: nowrap; }
+.playlist-filter-empty { margin: 18px 7px; }
 .secondary-button.compact { height: 30px; padding: 0 10px; font-size: 10px; gap: 5px; }
 
 /* Above persistent player (z-index 30) so Save/Cancel are never covered. */
@@ -1272,8 +1283,6 @@ html.compact-player-mode .persistent-player { grid-column: 1; grid-row: 1; heigh
 .tile-actions .icon-btn { width: 29px; height: 29px; }
 .tile-actions { right: 6px; bottom: 6px; }
 .playlist-detail-view { padding-top: 4px; }
-.playlist-detail-row { grid-template-columns: 28px minmax(0, 1fr) minmax(64px, auto); }
-.playlist-detail-row .song-album { display: none; }
 .playlist-edit-overlay { padding: 10px 10px 96px; }
 .playlist-edit-dialog {
   width: min(1600px, 99vw);
@@ -1308,12 +1317,7 @@ button.playlist-edit-item { cursor: pointer; }
 .playlist-edit-item .track-copy strong { font-size: 11px; }
 .playlist-edit-item .track-copy small { font-size: 9px; }
 
-.fallback-note {
-  object-fit: contain !important;
-  padding: 18% !important;
-  background: #151c26 !important;
-  opacity: .92;
-}
+.fallback-note { width: 100% !important; height: 100% !important; object-fit: cover !important; padding: 0 !important; background: transparent !important; opacity: 1; filter: none; }
 .range-slider {
   height: 4px;
   margin: 0;
@@ -1389,4 +1393,12 @@ button.playlist-edit-item { cursor: pointer; }
 @media (max-width: 640px) {
   .persistent-player { grid-template-columns: minmax(0, 1fr) auto auto; }
   .player-center { justify-content: flex-end; }
+  .playlist-detail-controls { flex-wrap: wrap; margin-right: 2px; margin-left: 2px; }
+  .playlist-detail-controls .playlist-search-v2 { flex-basis: 100%; }
+  .playlist-detail-controls .playlist-sort-select { min-width: 0; flex: 1 1 120px; }
+  .playlist-detail-controls .playlist-sort-direction { flex: 0 0 auto; }
+  .playlist-result-count { margin-left: 0; }
+  .playlist-detail-row { grid-template-columns: 28px minmax(0, 1fr) minmax(64px, auto); }
+  .playlist-detail-row .song-album, .playlist-detail-columns .song-album { display: none; }
+  .playlist-detail-columns { grid-template-columns: 28px minmax(0, 1fr) minmax(64px, auto); margin-right: 7px; margin-left: 7px; }
 }

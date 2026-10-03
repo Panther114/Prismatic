@@ -1,3 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Music">
-  <path fill="#f5f7fa" d="M48 6v34.5c0 6.9-5.6 12.5-12.5 12.5S23 48.9 23 43.8s5.6-9.2 12.5-9.2c2.1 0 4.1.4 5.8 1.1V17.2l-19.6 4.5v25.8C21.7 54.4 16.1 60 9.2 60S0 55.9 0 50.8s5.6-9.2 12.5-9.2c.9 0 1.7.1 2.5.2V13.9L48 6Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Music placeholder artwork">
+  <defs>
+    <linearGradient id="cover" x1="42" y1="28" x2="470" y2="492" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#bdeaff"/>
+      <stop offset=".5" stop-color="#d8e4ff"/>
+      <stop offset="1" stop-color="#ffd2e6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="matrix(342 280 -268 328 109 86)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".74"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="note" x1="148" y1="134" x2="365" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4f86a8"/>
+      <stop offset="1" stop-color="#a65f86"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#cover)" d="M0 0h512v512H0z"/>
+  <path fill="url(#glow)" d="M0 0h512v512H0z"/>
+  <g fill="none" stroke="url(#note)" stroke-linecap="round" stroke-linejoin="round" stroke-width="24">
+    <path d="M200 326V170l142-29v142"/>
+    <path d="m200 170 142-29"/>
+  </g>
+  <g fill="url(#note)">
+    <ellipse cx="160" cy="350" rx="50" ry="35" transform="rotate(-18 160 350)"/>
+    <ellipse cx="302" cy="321" rx="50" ry="35" transform="rotate(-18 302 321)"/>
+  </g>
+  <path fill="none" stroke="#fff" stroke-opacity=".42" d="M.5.5h511v511H.5z"/>
 </svg>

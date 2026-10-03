@@ -144,6 +144,7 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const recordDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const visualizerRef = useRef<VisualizerCanvasHandle>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
@@ -501,36 +502,51 @@ export default function App() {
     };
   }, [selected?.id]);
 
-  // WebAudio graph (analyser + MediaStream destination) is only built when
-  // Studio export needs it — normal playback goes straight through the
-  // hardware audio path to avoid the extra render thread and WebRTC buffers.
-  const ensureAudioGraph = async () => {
+  // Build the analyser only when Now Playing is visible. The MediaStream
+  // destination remains lazy and is added only for Studio exports.
+  const ensureAudioGraph = async (includeRecorder = true) => {
     const audio = audioRef.current;
     if (!audio) return;
     let context = audioContextRef.current;
     if (!context) {
       context = new AudioContext();
       audioContextRef.current = context;
+    }
+    // Resume before connecting the media element: if autoplay blocks this
+    // attempt, its existing direct audio route remains intact.
+    if (context.state === "suspended") await context.resume();
+    if (!sourceRef.current) {
       const source = context.createMediaElementSource(audio);
       sourceRef.current = source;
+    }
+    if (!analyserRef.current) {
       const nextAnalyser = context.createAnalyser();
-      // Smaller FFT → less CPU/RAM for live listen mode (export uses offline analysis).
+      // Smaller FFT keeps live spectrum sampling inexpensive.
       nextAnalyser.fftSize = 256;
       nextAnalyser.smoothingTimeConstant = 0.78;
-      const recordDest = context.createMediaStreamDestination();
-      recordDestRef.current = recordDest;
-      source.connect(nextAnalyser);
-      source.connect(recordDest);
+      analyserRef.current = nextAnalyser;
+      sourceRef.current?.connect(nextAnalyser);
       nextAnalyser.connect(context.destination);
       setAnalyser(nextAnalyser);
     }
-    if (context.state === "suspended") await context.resume();
+    if (includeRecorder && !recordDestRef.current) {
+      const recordDest = context.createMediaStreamDestination();
+      recordDestRef.current = recordDest;
+      sourceRef.current?.connect(recordDest);
+    }
   };
+
+  useEffect(() => {
+    if (view === "play" && playing) {
+      void ensureAudioGraph(false).catch(() => undefined);
+    }
+  }, [view, playing, selected?.id]);
 
   const togglePlayback = async () => {
     const audio = audioRef.current;
     if (!audio || !selected) return;
     if (audio.paused) {
+      if (view === "play") await ensureAudioGraph(false).catch(() => undefined);
       await audio.play();
     } else {
       audio.pause();
@@ -901,7 +917,7 @@ export default function App() {
 
     try {
       // Optional live graph for MediaRecorder fallback only
-      await ensureAudioGraph().catch(() => undefined);
+      await ensureAudioGraph(true).catch(() => undefined);
       const canvas = visualizerRef.current?.getCanvas();
       const audio = audioRef.current;
 
@@ -1342,6 +1358,11 @@ export default function App() {
     }
     playAfterLoadRef.current = true;
     selectTrack(trackId);
+  };
+
+  const openNowPlaying = () => {
+    if (playing) void ensureAudioGraph(false).catch(() => undefined);
+    setView("play");
   };
 
   const removeQueueTrack = (trackId: string) => {
@@ -1833,7 +1854,7 @@ export default function App() {
           <section className="status-panel">
             <div className="section-label">Library</div>
             <p>{tracks.length} tracks · {playlists.length} playlists</p>
-            <button type="button" className="secondary-button" style={{marginTop: 12}} disabled={!selected} onClick={() => {setView("play");}}>
+            <button type="button" className="secondary-button" style={{marginTop: 12}} disabled={!selected} onClick={openNowPlaying}>
               <PlayIcon size={14} /> Open player
             </button>
           </section>
@@ -1897,7 +1918,7 @@ export default function App() {
         }}
         onToggleShuffle={() => setQueue((current) => setShuffle(current, !current.shuffle))}
         onCycleRepeat={() => setQueue((current) => setRepeat(current, cycleRepeat(current.repeat)))}
-        onOpenNowPlaying={() => setView("play")}
+        onOpenNowPlaying={openNowPlaying}
         onToggleQueue={() => setQueueOpen((open) => !open)}
         onToggleCompact={() => void toggleCompact()}
       /> : null}
