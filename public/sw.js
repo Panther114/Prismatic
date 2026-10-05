@@ -1,5 +1,5 @@
 /* Prismatic offline shell — web only. Bump CACHE on every breaking UI release. */
-const CACHE = "prismatic-shell-v3";
+const CACHE = "prismatic-shell-v4";
 
 self.addEventListener("install", (event) => {
   // Activate immediately; do not precache index.html (it must stay network-first).

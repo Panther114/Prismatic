@@ -46,7 +46,9 @@ export class PlaylistRepository {
 
   private async write(list: Playlist[]) {
     await fs.mkdir(this.stateDirectory, {recursive: true});
-    await fs.writeFile(this.filePath, `${JSON.stringify(list, null, 2)}\n`, "utf8");
+    const tmpPath = `${this.filePath}.tmp`;
+    await fs.writeFile(tmpPath, `${JSON.stringify(list, null, 2)}\n`, "utf8");
+    await fs.rename(tmpPath, this.filePath);
     const stat = await fs.stat(this.filePath).catch(() => null);
     this.cache = list;
     this.cacheStamp = stat ? `${stat.mtimeMs}:${stat.size}` : null;

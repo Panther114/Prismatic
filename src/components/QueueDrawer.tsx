@@ -1,4 +1,6 @@
-import {ArrowDown, ArrowUp, ListMusic, Play, Trash2, X} from "lucide-react";
+import {ArrowDown, ArrowUp, GripVertical, ListMusic, Play, Trash2, X} from "lucide-react";
+import {useState} from "react";
+import {CoverImage} from "./CoverImage";
 import {currentId, getUpcomingQueue, type QueueState, type UpcomingQueueItem} from "../lib/playbackQueue";
 import type {Track} from "../types";
 
@@ -14,6 +16,8 @@ type Props = {
 };
 
 export function QueueDrawer({open, queue, tracksById, onClose, onPlay, onRemove, onMove, onClearUpcoming}: Props) {
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
   if (!open) return null;
   const current = currentId(queue);
   const currentIndex = current && queue.index >= 0 && queue.index < queue.order.length ? queue.index : -1;
@@ -36,19 +40,35 @@ export function QueueDrawer({open, queue, tracksById, onClose, onPlay, onRemove,
           const isCurrent = cycle === 0 && index === queue.index;
           const projected = cycle > 0;
           return (
-            <article className={`queue-item ${isCurrent ? "current" : ""} ${projected ? "projected" : ""}`} key={`${id}-${cycle}-${rowIndex}`}>
+            <article
+              className={`queue-item ${isCurrent ? "current" : ""} ${projected ? "projected" : ""} ${dragIndex === index && !projected ? "dragging" : ""} ${overIndex === index && dragIndex !== null && dragIndex !== index && !projected ? "drop-target" : ""}`}
+              key={`${id}-${cycle}-${rowIndex}`}
+              draggable={!projected}
+              onDragStart={(event) => {
+                setDragIndex(index);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", id);
+              }}
+              onDragOver={(event) => {
+                if (dragIndex === null || projected) return;
+                event.preventDefault();
+                if (overIndex !== index) setOverIndex(index);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (dragIndex !== null && !projected && dragIndex !== index) onMove(dragIndex, index);
+                setDragIndex(null);
+                setOverIndex(null);
+              }}
+              onDragEnd={() => {
+                setDragIndex(null);
+                setOverIndex(null);
+              }}
+            >
+              {!projected ? <GripVertical size={12} className="queue-grip" aria-hidden="true" /> : null}
               <button type="button" className="queue-play" onClick={() => onPlay(id)}>
                 {isCurrent ? <Play size={12} fill="currentColor" /> : <span>{rowIndex + 1}</span>}
-                <img
-                  className={track.coverUrl.includes("music-note.") ? "fallback-note" : ""}
-                  src={track.coverUrl}
-                  alt=""
-                  loading="lazy"
-                  onError={(event) => {
-                    event.currentTarget.src = "/music-note.svg";
-                    event.currentTarget.classList.add("fallback-note");
-                  }}
-                />
+                <CoverImage src={track.coverUrl} seed={track.id} loading="lazy" />
                 <span><strong>{track.title}</strong><small>{track.artist}</small></span>
               </button>
               <div className="queue-item-actions">

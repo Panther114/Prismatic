@@ -24,6 +24,8 @@ use symphonia::core::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use walkdir::{DirEntry, WalkDir};
 
+mod backup;
+
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"];
 
@@ -153,6 +155,7 @@ struct PlayerPrefs {
     repeat: String,
     volume: f64,
     muted: bool,
+    playback_rate: f64,
     visualizer_quality: String,
     resume_behavior: String,
     library_mode: String,
@@ -163,13 +166,14 @@ struct PlayerPrefs {
 impl Default for PlayerPrefs {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             shuffle: false,
             repeat: "off".into(),
             volume: 0.86,
             muted: false,
+            playback_rate: 1.0,
             visualizer_quality: "low".into(),
-            resume_behavior: "track".into(),
+            resume_behavior: "position".into(),
             library_mode: "songs".into(),
             library_sort: "title".into(),
             compact_player: false,
@@ -251,7 +255,14 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(display_err)?;
     }
     let text = serde_json::to_string_pretty(value).map_err(display_err)?;
-    fs::write(path, format!("{text}\n")).map_err(display_err)
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    fs::write(&tmp, format!("{text}\n")).map_err(display_err)?;
+    fs::rename(&tmp, path).map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        display_err(error)
+    })
 }
 
 fn image_extension(bytes: &[u8]) -> &'static str {
@@ -695,6 +706,82 @@ fn import_paths(
     unhide_imported_basenames(&paths, &imported_names)?;
     GENERATION.fetch_add(1, Ordering::Relaxed);
     scan_tracks(&paths)
+}
+
+/// Files and folders (from "Open with", drag-and-drop or the command line)
+/// reduced to the audio files inside them. Folders are scanned a few levels deep.
+fn expand_audio_paths(inputs: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for input in inputs {
+        let path = PathBuf::from(input);
+        if path.is_dir() {
+            let mut found: Vec<PathBuf> = WalkDir::new(&path)
+                .max_depth(4)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(include_entry)
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file() && is_audio(entry.path()))
+                .map(DirEntry::into_path)
+                .collect();
+            found.sort();
+            out.extend(found);
+        } else if path.is_file() && is_audio(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAudioResult {
+    tracks: Vec<DesktopTrack>,
+    /// Ids of the opened files, in the order they were given.
+    ids: Vec<String>,
+}
+
+/// Import audio files or folders into the library and report which tracks they became.
+#[tauri::command]
+fn open_audio_files(
+    paths: State<LibraryPaths>,
+    files: Vec<String>,
+) -> Result<OpenAudioResult, String> {
+    let mut names = Vec::new();
+    for file in expand_audio_paths(&files) {
+        if let Some(name) = copy_to_library(&paths, &file)? {
+            names.push(name);
+        }
+    }
+    unhide_imported_basenames(&paths, &names)?;
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    let ids = names.iter().map(|name| track_id("music", name)).collect();
+    Ok(OpenAudioResult {
+        tracks: scan_tracks(&paths)?,
+        ids,
+    })
+}
+
+/// Paths the app was launched with, kept until the frontend is ready for them.
+struct PendingOpen(Mutex<Vec<String>>);
+
+#[tauri::command]
+fn take_pending_open(pending: State<PendingOpen>) -> Vec<String> {
+    pending
+        .0
+        .lock()
+        .map(|mut list| std::mem::take(&mut *list))
+        .unwrap_or_default()
+}
+
+/// Command-line arguments that name an existing audio file or folder.
+fn launch_paths(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    args.into_iter()
+        .filter(|arg| {
+            let path = Path::new(arg);
+            path.is_dir() || (path.is_file() && is_audio(path))
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1290,12 +1377,27 @@ fn output_directory(paths: State<LibraryPaths>) -> String {
 pub fn run() {
     let paths = LibraryPaths::resolve().expect("failed to initialize Prismatic library");
     let watcher = start_watcher(&paths).expect("failed to watch Prismatic library");
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Must be the first plugin: a second launch (for example "Open with") hands
+    // its files to the running window and exits instead of starting a new app.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        let files = launch_paths(args.into_iter().skip(1));
+        if !files.is_empty() {
+            let _ = app.emit("open-files", files);
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .manage(paths.clone())
         .manage(watcher)
+        .manage(PendingOpen(Mutex::new(launch_paths(std::env::args().skip(1)))))
         .setup(move |app| {
             #[cfg(desktop)]
             {
@@ -1314,6 +1416,8 @@ pub fn run() {
             clear_library,
             import_paths,
             import_audio_bytes,
+            open_audio_files,
+            take_pending_open,
             import_folder,
             add_watch_folder,
             remove_watch_folder,
@@ -1326,6 +1430,10 @@ pub fn run() {
             waveform,
             export_playlist_zip,
             import_playlist_zip,
+            backup::export_library_backup,
+            backup::import_library_backup,
+            backup::cancel_library_backup,
+            backup::export_library_list,
             output_directory,
         ])
         .run(tauri::generate_context!())
@@ -1388,6 +1496,44 @@ mod tests {
         }
         assert!(!is_audio(Path::new("cover.jpg")));
         assert!(!is_audio(Path::new("song.mp3.exe")));
+    }
+
+    #[test]
+    fn expand_audio_paths_walks_folders_and_filters_files() {
+        let root = std::env::temp_dir().join(format!(
+            "prismatic-expand-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("album")).unwrap();
+        fs::write(root.join("album").join("b.mp3"), b"x").unwrap();
+        fs::write(root.join("album").join("a.flac"), b"x").unwrap();
+        fs::write(root.join("album").join("cover.jpg"), b"x").unwrap();
+        fs::write(root.join("loose.wav"), b"x").unwrap();
+        let notes = root.join("notes.txt");
+        fs::write(&notes, b"x").unwrap();
+
+        let found = expand_audio_paths(&[
+            root.join("album").to_string_lossy().into_owned(),
+            root.join("loose.wav").to_string_lossy().into_owned(),
+            notes.to_string_lossy().into_owned(),
+            root.join("missing.mp3").to_string_lossy().into_owned(),
+        ]);
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.flac", "b.mp3", "loose.wav"]);
+    }
+
+    #[test]
+    fn launch_paths_keeps_only_existing_audio_or_folders() {
+        let dir = std::env::temp_dir();
+        let args = vec![
+            "--flag".to_string(),
+            dir.to_string_lossy().into_owned(),
+            "definitely-missing.mp3".to_string(),
+        ];
+        assert_eq!(launch_paths(args), vec![dir.to_string_lossy().into_owned()]);
     }
 
     #[test]

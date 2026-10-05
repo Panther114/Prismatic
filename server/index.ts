@@ -205,10 +205,10 @@ if (localFeatures) {
       const track = await library.get(request.params.id);
       if (!track) return response.status(404).end();
       const cover = await library.cover(track);
-      // Missing embedded artwork is a normal track state; serve the bundled
-      // placeholder instead of emitting a noisy failed-image request in the
-      // browser console.
-      if (!cover) return response.redirect(302, "/music-note.svg");
+      // Missing embedded artwork is a normal track state. A 404 lets the UI
+      // swap in its generated placeholder tile (CoverImage); a redirect to the
+      // bundled icon would look like real artwork to the client.
+      if (!cover) return response.status(404).set("Cache-Control", "public, max-age=300").end();
       response.set({"Content-Type": cover.mime, "Cache-Control": "public, max-age=3600"}).send(cover.data);
     } catch (error) {
       next(error);

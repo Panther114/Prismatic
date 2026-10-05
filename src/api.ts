@@ -62,6 +62,8 @@ export interface PlatformBackend {
   updatePlaylist(id: string, body: {name?: string; trackIds?: string[]}): Promise<Playlist>;
   deletePlaylist(id: string): Promise<Playlist[]>;
   waveform(id: string): Promise<number[]>;
+  /** Desktop only: import files or folders and report the track ids they became. */
+  openAudioFiles?(paths: string[]): Promise<{tracks: Track[]; ids: string[]}>;
 }
 
 
@@ -220,6 +222,10 @@ class TauriBackend implements PlatformBackend {
     invoke<Playlist>("update_playlist", {id, name: body.name, trackIds: body.trackIds});
   deletePlaylist = (id: string) => invoke<Playlist[]>("delete_playlist", {id});
   waveform = (id: string) => invoke<number[]>("waveform", {id});
+  async openAudioFiles(paths: string[]) {
+    const result = await invoke<{tracks: DesktopTrack[]; ids: string[]}>("open_audio_files", {files: paths});
+    return {tracks: result.tracks.map(mapDesktopTrack), ids: result.ids};
+  }
 }
 
 

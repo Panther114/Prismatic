@@ -14,6 +14,21 @@ import {QueueDrawer} from "./components/QueueDrawer";
 import {CustomSelect} from "./components/CustomSelect";
 import {UpdateDialog} from "./components/UpdateDialog";
 import {UpdateSettingsCard} from "./components/UpdateSettingsCard";
+import {BackupCard} from "./components/BackupCard";
+import {CoverImage} from "./components/CoverImage";
+import {DropOverlay} from "./components/DropOverlay";
+import {useExternalFiles} from "./hooks/useExternalFiles";
+import {ShortcutsDialog} from "./components/ShortcutsDialog";
+import {ToastHost} from "./components/ToastHost";
+import {useSleepTimer} from "./hooks/useSleepTimer";
+import {timeStore} from "./lib/timeStore";
+import {toast} from "./lib/toast";
+import {loadResumePoint, saveResumePoint, shouldResume, type ResumePoint} from "./lib/resumeStore";
+import {digitSeekRatio, resolveShortcut, type ShortcutAction} from "./lib/shortcuts";
+import {normalizeRate} from "./lib/playerPrefs";
+import {revealItemInDir} from "@tauri-apps/plugin-opener";
+import {FAVORITES_NAME, favoriteIdSet, findFavorites, toggleFavoriteIds} from "./lib/favorites";
+import {loadRecent, pushRecent, saveRecent} from "./lib/history";
 import {clientLibrary} from "./lib/clientLibrary";
 import {exportClientVideo, exportPlaylistClientVideo} from "./lib/clientExport";
 import {buildRenderSettings, playlistVisualsFileName, visualsFileName} from "./lib/resolutions";
@@ -25,6 +40,8 @@ import {
   clearUpcoming,
   currentId,
   cycleRepeat,
+  enqueueLast,
+  enqueueNext,
   loadQueue,
   jumpTo,
   onTrackEnded,
@@ -59,13 +76,9 @@ function rememberWaveform(cache: Map<string, number[]>, id: string, wave: number
 }
 
 function TrackCover({track}: {track: Track}) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [track.id]);
   return (
     <span className="track-cover" aria-hidden="true">
-      {!failed
-        ? <img className={track.coverUrl.includes("music-note.") ? "fallback-note" : ""} src={track.coverUrl} alt="" onError={() => setFailed(true)} />
-        : <img className="fallback-note" src="/music-note.svg" alt="" />}
+      <CoverImage src={track.coverUrl} seed={track.id} />
     </span>
   );
 }
@@ -93,7 +106,15 @@ export default function App() {
   const [jobs, setJobs] = useState<RenderJob[]>([]);
   const [savedRenders, setSavedRenders] = useState<SavedRender[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // Errors surface as auto-dismissing toasts; "" (used to clear the old banner) is a no-op.
+  const setError = useCallback((message: string) => {
+    if (message) toast.error(message);
+  }, []);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [recentIds, setRecentIds] = useState<string[]>(() => loadRecent());
+  const [rate, setRate] = useState(1);
+  const [resumeBehavior, setResumeBehavior] = useState<"track" | "position">(loadPlayerPrefsLocal().resumeBehavior ?? "position");
   const [cloudMode, setCloudMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -128,7 +149,6 @@ export default function App() {
   // Seed from localStorage only; disk prefs load once local mode is known.
   const initialPrefs = useMemo(() => loadPlayerPrefsLocal(), []);
   const [playing, setPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(initialPrefs.volume);
   const [muted, setMuted] = useState(initialPrefs.muted);
   // Desktop/Tauri is always local; cloud only until health proves otherwise (or web cloud).
@@ -158,15 +178,35 @@ export default function App() {
   const playlistsReadyRef = useRef(false);
   const prefetchRef = useRef<HTMLAudioElement | null>(null);
   const playAfterLoadRef = useRef(false);
+  const volumeRef = useRef({volume: initialPrefs.volume, muted: initialPrefs.muted});
+  const resumeBehaviorRef = useRef<"track" | "position">(initialPrefs.resumeBehavior ?? "position");
+  const pendingResumeRef = useRef<ResumePoint | null>(null);
+  const resumeInitRef = useRef(false);
+  const selectedIdRef = useRef("");
+  const lastResumeWriteRef = useRef(0);
+  const rateRef = useRef(1);
+  const sleepModeRef = useRef<ReturnType<typeof useSleepTimer>["mode"]>(null);
+  const actionsRef = useRef<Partial<Record<ShortcutAction, () => void>>>({});
+  const seekRatioRef = useRef<(ratio: number) => void>(() => undefined);
 
   queueRef.current = queue;
+  volumeRef.current = {volume, muted};
+  rateRef.current = rate;
+  resumeBehaviorRef.current = resumeBehavior;
+  const {mode: sleepMode, setMode: setSleepMode} = useSleepTimer({
+    audioRef,
+    getVolume: () => (volumeRef.current.muted ? 0 : volumeRef.current.volume),
+    onSleep: () => toast.info("Sleep timer finished. Playback paused."),
+  });
+  sleepModeRef.current = sleepMode;
   const playerChromeVisible = view === "library" || view === "play" || view === "playlists";
 
   const selected = useMemo(() => tracks.find((track) => track.id === selectedId) || tracks[0], [tracks, selectedId]);
   const activeJob = useMemo(() => jobs.find((job) => job.trackId === selected?.id && ACTIVE_STATUSES.has(job.status)), [jobs, selected?.id]);
   const dirty = Boolean(selected && (title !== selected.title || artist !== selected.artist));
-  const progress = selected?.duration ? Math.min(1, currentTime / selected.duration) : 0;
+  selectedIdRef.current = selected?.id ?? "";
   const tracksById = useMemo(() => new Map(tracks.map((t) => [t.id, t])), [tracks]);
+  const favoriteIds = useMemo(() => favoriteIdSet(playlists), [playlists]);
 
   // Playlist edits (add/remove/reorder/rename) can happen while a playlist is
   // playing. Keep the queue tied to its stable source id so the upcoming list
@@ -221,6 +261,30 @@ export default function App() {
     return [...byId.values()];
   }, []);
 
+  /** Remember where playback is so the next launch can pick up from here. */
+  const persistResume = useCallback(() => {
+    if (resumeBehaviorRef.current !== "position") return;
+    const audio = audioRef.current;
+    const trackId = selectedIdRef.current;
+    // Never overwrite a saved point before it was applied to its own track.
+    if (!audio || !trackId || pendingResumeRef.current) return;
+    saveResumePoint({trackId, position: audio.currentTime});
+    lastResumeWriteRef.current = Date.now();
+  }, []);
+
+  /** Seek to the saved position once the right track's metadata is ready. */
+  const applyPendingResume = useCallback(() => {
+    const pending = pendingResumeRef.current;
+    const audio = audioRef.current;
+    if (!pending || !audio || pending.trackId !== selectedIdRef.current) return;
+    if (audio.readyState < 1) return;
+    pendingResumeRef.current = null;
+    if (shouldResume(pending.position, audio.duration)) {
+      audio.currentTime = pending.position;
+      timeStore.set(pending.position);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     const health = await api.health().catch(() => null);
     // Desktop (Tauri) and local Node always offline-disk; never treat as cloud.
@@ -255,17 +319,23 @@ export default function App() {
     playlistStore.setMode(modeCloud ? "cloud" : "local");
     const nextTracks = mergeTracks(serverTracks, modeCloud);
     setTracks(nextTracks);
-    setSelectedId((current) => {
-      if (current && nextTracks.some((track) => track.id === current)) return current;
-      return nextTracks[0]?.id || "";
-    });
-    setQueue((q) => {
-      if (q.order.length) return q;
+    // On the first load the persisted queue knows which track was current;
+    // restore that instead of defaulting to the first track alphabetically.
+    let restoredId = "";
+    if (!queueRef.current.order.length) {
+      const q = queueRef.current;
       const fallback = createQueue(
         nextTracks.map((t) => t.id),
         {shuffle: q.shuffle, repeat: q.repeat, startId: nextTracks[0]?.id, sourceLabel: "Library", source: {kind: "library"}},
       );
-      return loadQueue(nextTracks.map((track) => track.id), fallback);
+      const loaded = loadQueue(nextTracks.map((track) => track.id), fallback);
+      restoredId = currentId(loaded) || "";
+      setQueue(loaded);
+    }
+    setSelectedId((current) => {
+      if (current && nextTracks.some((track) => track.id === current)) return current;
+      if (restoredId && nextTracks.some((track) => track.id === restoredId)) return restoredId;
+      return nextTracks[0]?.id || "";
     });
 
     // Shared offline prefs (disk) for local web + desktop — gate saves until this finishes.
@@ -273,6 +343,16 @@ export default function App() {
       const prefs = await loadPlayerPrefs(modeCloud ? "cloud" : "local");
       setVolume(prefs.volume);
       setMuted(prefs.muted);
+      setRate(normalizeRate(prefs.playbackRate));
+      resumeBehaviorRef.current = prefs.resumeBehavior ?? "position";
+      setResumeBehavior(resumeBehaviorRef.current);
+      if (!resumeInitRef.current) {
+        resumeInitRef.current = true;
+        if (resumeBehaviorRef.current === "position") {
+          pendingResumeRef.current = loadResumePoint();
+          applyPendingResume();
+        }
+      }
       setQueue((q) => ({
         ...q,
         shuffle: prefs.shuffle,
@@ -319,7 +399,7 @@ export default function App() {
     } catch {
       // Watch UI optional.
     }
-  }, [mergeTracks]);
+  }, [mergeTracks, applyPendingResume]);
 
   useEffect(() => {
     if (!selected?.clientOnly || !selected.mediaUrl.startsWith("client-audio:")) return;
@@ -354,8 +434,11 @@ export default function App() {
     const onVis = () => {
       const visible = document.visibilityState === "visible";
       setPageVisible(visible);
-      if (!visible) return;
-      setCurrentTime(audioRef.current?.currentTime || 0);
+      if (!visible) {
+        persistResume();
+        return;
+      }
+      timeStore.set(audioRef.current?.currentTime || 0);
       const ctx = audioContextRef.current;
       if (ctx?.state === "suspended" && !audioRef.current?.paused) {
         void ctx.resume().catch(() => undefined);
@@ -369,6 +452,9 @@ export default function App() {
   useEffect(() => {
     if (cloudMode) return;
     const timer = window.setInterval(() => {
+      // Nothing is on screen while hidden; the first tick after the window
+      // returns compares the generation counter and catches up.
+      if (document.visibilityState === "hidden") return;
       api.libraryMeta()
         .then((meta) => {
           if (meta.generation === libraryGenerationRef.current) return;
@@ -391,7 +477,7 @@ export default function App() {
   useEffect(() => {
     setTitle(selected?.title || "");
     setArtist(selected?.artist || "");
-    setCurrentTime(0);
+    timeStore.set(0);
     setWaveform([]);
     const audio = audioRef.current;
     const shouldAutoplay = playAfterLoadRef.current || autoplayNext;
@@ -462,13 +548,22 @@ export default function App() {
       repeat: queue.repeat,
       volume,
       muted,
+      playbackRate: rate,
       visualizerQuality: "low",
-      resumeBehavior: "track",
+      resumeBehavior,
       libraryMode,
       librarySort,
       compactPlayer,
     });
-  }, [queue.shuffle, queue.repeat, volume, muted, libraryMode, librarySort, compactPlayer]);
+  }, [queue.shuffle, queue.repeat, volume, muted, rate, resumeBehavior, libraryMode, librarySort, compactPlayer]);
+
+  // `load()` resets the element's rate, so keep both the live and default rate in sync.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.defaultPlaybackRate = rate;
+    audio.playbackRate = rate;
+  }, [rate, selected?.id, selected?.mediaUrl]);
 
   // Metadata-only prefetch avoids buffering or decoding two complete songs.
   useEffect(() => {
@@ -488,19 +583,29 @@ export default function App() {
     if (!audio) return;
     // UI time sync rides the native ~4Hz `timeupdate` event — no rAF loop, so
     // the whole app tree is not re-rendered 60 times a second while playing.
-    const onPause = () => setCurrentTime(audio.currentTime);
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const onPause = () => {
+      timeStore.set(audio.currentTime);
+      if (audio.paused) persistResume();
+    };
+    const onSeeked = () => timeStore.set(audio.currentTime);
+    const onTimeUpdate = () => {
+      timeStore.set(audio.currentTime);
+      // At most one small write every 5 s; position state is throttled the same way.
+      if (Date.now() - lastResumeWriteRef.current >= 5000) persistResume();
+    };
     audio.addEventListener("pause", onPause);
     audio.addEventListener("ended", onPause);
-    audio.addEventListener("seeked", onPause);
+    audio.addEventListener("seeked", onSeeked);
     audio.addEventListener("timeupdate", onTimeUpdate);
+    window.addEventListener("beforeunload", persistResume);
     return () => {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("ended", onPause);
-      audio.removeEventListener("seeked", onPause);
+      audio.removeEventListener("seeked", onSeeked);
       audio.removeEventListener("timeupdate", onTimeUpdate);
+      window.removeEventListener("beforeunload", persistResume);
     };
-  }, [selected?.id]);
+  }, [selected?.id, persistResume]);
 
   // Build the analyser only when Now Playing is visible. The MediaStream
   // destination remains lazy and is added only for Studio exports.
@@ -566,6 +671,12 @@ export default function App() {
   }, []);
 
   const handleTrackEnded = useCallback(() => {
+    if (sleepModeRef.current?.type === "track") {
+      setSleepMode(null);
+      setPlaying(false);
+      toast.info("Sleep timer finished. Playback stopped after this track.");
+      return;
+    }
     const result = onTrackEnded(queueRef.current);
     setQueue(result.queue);
     if (result.trackId && result.autoplay) {
@@ -622,7 +733,7 @@ export default function App() {
     setQueue(result.queue);
     if (result.restart && result.trackId === selectedId && audio) {
       audio.currentTime = 0;
-      setCurrentTime(0);
+      timeStore.set(0);
       return;
     }
     if (result.trackId) goToTrack(result.trackId, playing);
@@ -631,6 +742,17 @@ export default function App() {
   useEffect(() => {
     saveQueue(queue);
   }, [queue]);
+
+  // "Recent" only records tracks that actually started playing.
+  useEffect(() => {
+    if (!playing || !selected?.id) return;
+    setRecentIds((current) => {
+      if (current[0] === selected.id) return current;
+      const next = pushRecent(current, selected.id);
+      saveRecent(next);
+      return next;
+    });
+  }, [playing, selected?.id]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !selected) return;
@@ -683,18 +805,30 @@ export default function App() {
     };
   }, [playing, selected?.id, queue.index]);
 
+  // System media controls only need the position on state changes (play,
+  // pause, seek, rate, track), not on every clock tick.
   useEffect(() => {
     if (!("mediaSession" in navigator) || !selected || selected.duration <= 0) return;
-    try {
-      navigator.mediaSession.setPositionState({
-        duration: selected.duration,
-        playbackRate: audioRef.current?.playbackRate || 1,
-        position: Math.min(selected.duration, Math.max(0, currentTime)),
-      });
-    } catch {
-      // Some browsers reject position state until metadata is fully loaded.
-    }
-  }, [currentTime, selected?.duration]);
+    const audio = audioRef.current;
+    const publish = () => {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: selected.duration,
+          playbackRate: audio?.playbackRate || 1,
+          position: Math.min(selected.duration, Math.max(0, audio?.currentTime || 0)),
+        });
+      } catch {
+        // Some browsers reject position state until metadata is fully loaded.
+      }
+    };
+    publish();
+    audio?.addEventListener("seeked", publish);
+    audio?.addEventListener("ratechange", publish);
+    return () => {
+      audio?.removeEventListener("seeked", publish);
+      audio?.removeEventListener("ratechange", publish);
+    };
+  }, [selected?.id, selected?.duration, playing, rate]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -702,47 +836,20 @@ export default function App() {
       const tag = target?.tagName || "";
       if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
       if (document.querySelector('[role="dialog"]')) return;
-      if (event.code === "Space" && !event.repeat) {
+      const action = resolveShortcut(event);
+      if (action) {
+        // Space and arrows must not also scroll or re-click a focused button.
+        if (event.repeat && action === "playPause") return;
+        const handler = actionsRef.current[action];
+        if (!handler) return;
         event.preventDefault();
-        void togglePlaybackRef.current();
+        handler();
         return;
       }
-      if (event.key === "m" || event.key === "M") {
+      const ratio = digitSeekRatio(event);
+      if (ratio !== null) {
         event.preventDefault();
-        setMuted((m) => !m);
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-        event.preventDefault();
-        setView("library");
-        window.requestAnimationFrame(() => {
-          document.querySelector<HTMLInputElement>('[aria-label="Search library"]')?.focus();
-        });
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
-        event.preventDefault();
-        if (isTauri) void importFiles([]);
-        else fileInputRef.current?.click();
-        return;
-      }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "q") {
-        event.preventDefault();
-        setQueueOpen((open) => !open);
-        return;
-      }
-      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        const audio = audioRef.current;
-        if (!audio) return;
-        event.preventDefault();
-        const direction = event.key === "ArrowRight" ? 1 : -1;
-        audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + direction * 5));
-        setCurrentTime(audio.currentTime);
-        return;
-      }
-      if (event.altKey && ["1", "2", "3"].includes(event.key)) {
-        event.preventDefault();
-        setView(event.key === "1" ? "library" : event.key === "2" ? "playlists" : "studio");
+        seekRatioRef.current(ratio);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1344,6 +1451,39 @@ export default function App() {
     }
   };
 
+  /** Desktop: import files/folders handed over by the OS or dropped on the window. */
+  const openExternal = async (paths: string[], playFirst: boolean) => {
+    if (!api.openAudioFiles) return;
+    setImporting(true);
+    try {
+      const result = await api.openAudioFiles(paths);
+      const merged = mergeTracks(result.tracks, false);
+      setTracks(merged);
+      if (!result.ids.length) {
+        toast.info("No supported audio files found.");
+        return;
+      }
+      if (playFirst) {
+        playQueue(merged.map((track) => track.id), {startId: result.ids[0], autoplay: true});
+      } else {
+        toast.info(`Added ${result.ids.length} track${result.ids.length === 1 ? "" : "s"} to your library.`);
+      }
+      setView("library");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  useExternalFiles({
+    ready: !loading,
+    onOpen: (paths) => void openExternal(paths, true),
+    onDropPaths: (paths) => void openExternal(paths, false),
+    onDropFiles: (files) => void importFiles(files),
+    onDragging: setDragging,
+  });
+
   const nav = [
     {id: "library" as const, label: "Library", icon: Library},
     {id: "playlists" as const, label: "Playlists", icon: ListMusic},
@@ -1407,6 +1547,76 @@ export default function App() {
     }
   };
 
+  const playNextIds = (ids: string[]) => {
+    // Reverse so the selection ends up in its original order right after the current track.
+    setQueue((current) => [...ids].reverse().reduce((state, id) => enqueueNext(state, id), current));
+    toast.info(`${ids.length} song${ids.length === 1 ? "" : "s"} will play next.`);
+  };
+
+  const addIdsToQueue = (ids: string[]) => {
+    setQueue((current) => ids.reduce((state, id) => enqueueLast(state, id), current));
+    toast.info(`Added ${ids.length} song${ids.length === 1 ? "" : "s"} to the queue.`);
+  };
+
+  const addManyToPlaylist = async (playlistId: string, ids: string[]) => {
+    const playlist = playlists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+    const fresh = ids.filter((id) => !playlist.trackIds.includes(id));
+    if (!fresh.length) {
+      toast.info(`Already in “${playlist.name}”.`);
+      return;
+    }
+    try {
+      await playlistStore.update(playlistId, {trackIds: [...playlist.trackIds, ...fresh]});
+      setPlaylists(playlistStore.list());
+      toast.info(`Added ${fresh.length} song${fresh.length === 1 ? "" : "s"} to “${playlist.name}”.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const toggleFavorites = async (ids: string[]) => {
+    if (!ids.length) return;
+    try {
+      const existing = findFavorites(playlists);
+      // Mixed selections favorite everything; an all-favorite selection clears them.
+      const removing = existing ? ids.every((id) => existing.trackIds.includes(id)) : false;
+      let next = existing?.trackIds ?? [];
+      for (const id of ids) {
+        const has = next.includes(id);
+        if (removing ? has : !has) next = toggleFavoriteIds(next, id);
+      }
+      if (existing) await playlistStore.update(existing.id, {trackIds: next});
+      else await playlistStore.create(FAVORITES_NAME, next);
+      setPlaylists(playlistStore.list());
+      if (ids.length > 1) toast.info(removing ? "Removed from favorites." : "Added to favorites.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const revealTrack = (track: Track) => {
+    if (!track.mediaPath) return;
+    void revealItemInDir(track.mediaPath).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
+
+  const removeMany = (ids: string[]) => {
+    if (!ids.length) return;
+    const first = tracksById.get(ids[0]);
+    setConfirmDialog({
+      mode: "simple",
+      title: ids.length === 1 ? "Remove song" : `Remove ${ids.length} songs`,
+      body: ids.length === 1
+        ? `Remove “${first?.title ?? "this song"}” from your library? Its copy in the Prismatic folder is deleted; originals elsewhere are untouched.`
+        : `Remove ${ids.length} songs from your library? Their copies in the Prismatic folder are deleted; originals elsewhere are untouched.`,
+      confirmLabel: "Remove",
+      danger: true,
+      onConfirm: async () => {
+        for (const id of ids) await executeRemoveTrack(id, true);
+      },
+    });
+  };
+
   const toggleCompact = async () => {
     const next = !compactPlayer;
     try {
@@ -1420,9 +1630,80 @@ export default function App() {
   const seek = useCallback((next: number) => {
     if (audioRef.current && selected) {
       audioRef.current.currentTime = next * selected.duration;
-      setCurrentTime(next * selected.duration);
+      timeStore.set(next * selected.duration);
     }
   }, [selected]);
+  seekRatioRef.current = seek;
+
+  const seekBy = (seconds: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const limit = Number.isFinite(audio.duration) ? audio.duration : Number.MAX_SAFE_INTEGER;
+    audio.currentTime = Math.max(0, Math.min(limit, audio.currentTime + seconds));
+    timeStore.set(audio.currentTime);
+  };
+
+  const nudgeVolume = (delta: number) => {
+    const next = Math.round(Math.min(1, Math.max(0, (muted ? 0 : volume) + delta)) * 100) / 100;
+    setVolume(next);
+    if (next > 0) {
+      lastVolumeRef.current = next;
+      setMuted(false);
+    }
+    toast.info(`Volume ${Math.round(next * 100)}%`, {durationMs: 900});
+  };
+
+  const changeRate = (next: number) => {
+    const value = normalizeRate(next);
+    setRate(value);
+    toast.info(`Speed ${Number(value.toFixed(2))}×`, {durationMs: 900});
+  };
+
+  const focusSearch = () => {
+    setView("library");
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>('[aria-label="Search library"]')?.focus();
+    });
+  };
+
+  const toggleMuteAction = () => {
+    setMuted((current) => {
+      if (current) {
+        setVolume(lastVolumeRef.current || 0.86);
+        return false;
+      }
+      if (volume > 0) lastVolumeRef.current = volume;
+      return true;
+    });
+  };
+
+  actionsRef.current = {
+    playPause: () => void togglePlaybackRef.current(),
+    next: () => selectAdjacent(1),
+    prev: () => selectAdjacent(-1),
+    seekBack: () => seekBy(-5),
+    seekForward: () => seekBy(5),
+    seekBackLong: () => seekBy(-30),
+    seekForwardLong: () => seekBy(30),
+    volumeUp: () => nudgeVolume(0.05),
+    volumeDown: () => nudgeVolume(-0.05),
+    mute: toggleMuteAction,
+    shuffle: () => setQueue((current) => setShuffle(current, !current.shuffle)),
+    repeat: () => setQueue((current) => setRepeat(current, cycleRepeat(current.repeat))),
+    speedDown: () => changeRate(rateRef.current - 0.25),
+    speedUp: () => changeRate(rateRef.current + 0.25),
+    queue: () => setQueueOpen((open) => !open),
+    search: focusSearch,
+    import: () => {
+      if (isTauri) void importFiles([]);
+      else fileInputRef.current?.click();
+    },
+    help: () => setShortcutsOpen((open) => !open),
+    library: () => setView("library"),
+    playlists: () => setView("playlists"),
+    studio: () => setView("studio"),
+    nowPlaying: () => openNowPlaying(),
+  };
 
   const sidebarPlaylists = (
     <div className="track-list sidebar-playlists custom-scroll">
@@ -1480,8 +1761,15 @@ export default function App() {
         src={selected?.mediaUrl}
         crossOrigin="anonymous"
         preload="metadata"
-        onPlay={() => setPlaying(true)}
+        onPlay={() => {
+          // Starting a different track than the saved point abandons the resume.
+          if (pendingResumeRef.current && pendingResumeRef.current.trackId !== selectedIdRef.current) {
+            pendingResumeRef.current = null;
+          }
+          setPlaying(true);
+        }}
         onPause={() => setPlaying(false)}
+        onLoadedMetadata={applyPendingResume}
         onEnded={() => handleTrackEnded()}
       />
       <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*,.flac,.m4a,.opus" multiple onChange={(event) => event.target.files && void importFiles(event.target.files)} />
@@ -1546,6 +1834,15 @@ export default function App() {
             onClear={clearLibrary}
             onImportFiles={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()}
             onImportFolder={() => isTauri ? void browseImportFolder() : folderInputRef.current?.click()}
+            favoriteIds={favoriteIds}
+            recentIds={recentIds}
+            canReveal={isTauri}
+            onToggleFavorite={(ids) => void toggleFavorites(ids)}
+            onPlayNext={playNextIds}
+            onAddToQueue={addIdsToQueue}
+            onAddManyToPlaylist={(playlistId, ids) => void addManyToPlaylist(playlistId, ids)}
+            onRemoveMany={removeMany}
+            onReveal={revealTrack}
           />
         )}
         {view === "play" && (
@@ -1555,13 +1852,13 @@ export default function App() {
                 ref={visualizerRef}
                 analyser={analyser}
                 waveform={waveform}
-                progress={progress}
+                duration={selected?.duration ?? 0}
                 playing={playing}
                 active={view === "play" && pageVisible}
                 quality="low"
                 exportSize={null}
               />
-              {selected && <DiscPlayer key={selected.id} track={selected} playing={playing} currentTime={currentTime} progress={progress} />}
+              {selected && <DiscPlayer key={selected.id} track={selected} playing={playing} />}
               {!selected && <div className="stage-empty"><Music2 size={42} /><h1>Import a track to play</h1></div>}
             </div>
           </>
@@ -1602,6 +1899,8 @@ export default function App() {
             onExport={(pl) => void startPlaylistExport(pl)}
             onExportZip={isTauri ? (pl) => void exportZipPlaylist(pl) : undefined}
             onImportZip={isTauri ? () => void importZipPlaylist() : undefined}
+            currentTrackId={selected?.id}
+            playing={playing}
             zipBusy={zipBusy}
             zipStatus={zipStatus}
             exporting={jobs.some((j) => ACTIVE_STATUSES.has(j.status) && j.id.startsWith("playlist-"))}
@@ -1619,10 +1918,10 @@ export default function App() {
                 {" · "}MP3, WAV, FLAC, M4A, AAC, OGG, Opus
               </p>
             </div>
-            <button className="drop-zone" onClick={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {event.preventDefault(); void importFiles(event.dataTransfer.files);}}>
+            <button className="drop-zone" onClick={() => isTauri ? void importFiles([]) : fileInputRef.current?.click()}>
               {importing ? <LoaderCircle className="spin" size={26} /> : <CloudUpload size={26} strokeWidth={1.4} />}
               <strong>{importing ? "Importing & copying…" : "Drop audio here"}</strong>
-              <span>or choose files</span>
+              <span>or choose files · drop files anywhere in the window</span>
             </button>
 
             <section className="watch-panel import-folder-panel">
@@ -1727,6 +2026,24 @@ export default function App() {
                 </ul>
               </section>
             )}
+            <section className="watch-panel" aria-label="Playback preferences">
+              <div className="watch-panel-head">
+                <PlayIcon size={15} />
+                <div>
+                  <strong>Playback</strong>
+                  <span>Press ? anywhere for keyboard shortcuts.</span>
+                </div>
+              </div>
+              <label className="backup-check">
+                <input
+                  type="checkbox"
+                  checked={resumeBehavior === "position"}
+                  onChange={(event) => setResumeBehavior(event.target.checked ? "position" : "track")}
+                />
+                <span>Resume the last track at the position I stopped</span>
+              </label>
+            </section>
+            {isTauri && <BackupCard onRestored={refresh} onError={setError} />}
             <UpdateSettingsCard onOpenDialog={() => setUpdateDialogOpen(true)} />
             {cloudMode && (
               <p className="save-hint mono" style={{marginTop: "1rem"}}>
@@ -1888,13 +2205,16 @@ export default function App() {
       {playerChromeVisible ? <PersistentPlayer
         track={selected}
         playing={playing}
-        currentTime={currentTime}
         duration={selected?.duration || 0}
         volume={volume}
         muted={muted}
         shuffle={queue.shuffle}
         repeat={queue.repeat}
         compact={compactPlayer}
+        rate={rate}
+        sleep={sleepMode}
+        onRate={changeRate}
+        onSleep={setSleepMode}
         onTogglePlay={() => void togglePlayback()}
         onPrev={() => selectAdjacent(-1)}
         onNext={() => selectAdjacent(1)}
@@ -1906,16 +2226,7 @@ export default function App() {
             setMuted(false);
           }
         }}
-        onToggleMute={() => {
-          setMuted((current) => {
-            if (current) {
-              setVolume(lastVolumeRef.current || 0.86);
-              return false;
-            }
-            if (volume > 0) lastVolumeRef.current = volume;
-            return true;
-          });
-        }}
+        onToggleMute={toggleMuteAction}
         onToggleShuffle={() => setQueue((current) => setShuffle(current, !current.shuffle))}
         onCycleRepeat={() => setQueue((current) => setRepeat(current, cycleRepeat(current.repeat)))}
         onOpenNowPlaying={openNowPlaying}
@@ -1923,7 +2234,9 @@ export default function App() {
         onToggleCompact={() => void toggleCompact()}
       /> : null}
 
-      {error && <button className="error-toast" onClick={() => setError("")}><span>{error}</span><X size={16} /></button>}
+      <DropOverlay visible={dragging} />
+      <ToastHost />
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
 
       <UpdateDialog
         forceOpen={updateDialogOpen}

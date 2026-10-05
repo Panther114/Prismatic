@@ -71,3 +71,4 @@ output/playwright/
 
 # Optional native render cache (local only)
 .cache/
+.tmp-demo-library/
