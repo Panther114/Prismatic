@@ -1,9 +1,11 @@
 import {forwardRef, useEffect, useImperativeHandle, useRef} from "react";
+import {timeStore} from "../lib/timeStore";
 
 type Props = {
   analyser: AnalyserNode | null;
   waveform: number[];
-  progress: number;
+  /** Track length in seconds; progress is derived from the shared clock. */
+  duration: number;
   playing: boolean;
   /** When false, stop the animation loop (tab hidden / not on Play view). */
   active?: boolean;
@@ -54,13 +56,20 @@ function colorAt(position: number, alpha = 1) {
 }
 
 export const VisualizerCanvas = forwardRef<VisualizerCanvasHandle, Props>(function VisualizerCanvas(
-  {analyser, waveform, progress, playing, active = true, quality = "high", exportSize = null},
+  {analyser, waveform, duration, playing, active = true, quality = "high", exportSize = null},
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lastBins = useRef(new Float32Array(96));
-  const propsRef = useRef({analyser, waveform, progress, playing, active, quality, exportSize});
-  propsRef.current = {analyser, waveform, progress, playing, active, quality, exportSize};
+  // Progress is read lazily from the shared clock each frame, so this
+  // component never re-renders just because the playback time moved.
+  const propsRef = useRef({
+    analyser, waveform, duration, playing, active, quality, exportSize,
+    get progress() {
+      return this.duration > 0 ? Math.min(1, timeStore.get() / this.duration) : 0;
+    },
+  });
+  Object.assign(propsRef.current, {analyser, waveform, duration, playing, active, quality, exportSize});
 
   useImperativeHandle(ref, () => ({
     getCanvas: () => canvasRef.current,

@@ -13,6 +13,8 @@ export type Track = {
   duration: number;
   bitrate: number | null;
   format: string;
+  /** Absolute file path on desktop; used for "Show in folder". */
+  mediaPath?: string;
   /** Present when the track lives only in the browser (cloud / client mode). */
   clientOnly?: boolean;
 };
@@ -64,12 +66,15 @@ export type Playlist = {
 export type RepeatMode = "off" | "all" | "one";
 
 export type PlayerPrefs = {
-  schemaVersion?: 2;
+  schemaVersion?: 2 | 3;
   shuffle: boolean;
   repeat: RepeatMode;
   volume: number;
   muted: boolean;
+  /** 0.5–2; pitch is preserved. */
+  playbackRate?: number;
   visualizerQuality?: "low" | "high";
+  /** "position" restores the track and the time within it after a restart. */
   resumeBehavior?: "track" | "position";
   libraryMode?: LibraryMode;
   librarySort?: LibrarySort;

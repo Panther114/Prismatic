@@ -3,14 +3,24 @@ import {api} from "../api";
 
 const KEY = "prismatic.playerPrefs";
 
+export const MIN_RATE = 0.5;
+export const MAX_RATE = 2;
+
+/** Clamp to the supported range and snap to 0.05 steps so UI labels stay tidy. */
+export function normalizeRate(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  return Math.round(Math.min(MAX_RATE, Math.max(MIN_RATE, value)) * 20) / 20;
+}
+
 const defaults: PlayerPrefs = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   shuffle: false,
   repeat: "off",
   volume: 0.86,
   muted: false,
+  playbackRate: 1,
   visualizerQuality: "low",
-  resumeBehavior: "track",
+  resumeBehavior: "position",
   libraryMode: "songs",
   librarySort: "title",
   compactPlayer: false,
@@ -25,14 +35,18 @@ function normalize(raw: Partial<PlayerPrefs> | null | undefined): PlayerPrefs {
   const volume = typeof raw?.volume === "number" && Number.isFinite(raw.volume)
     ? Math.min(1, Math.max(0, raw.volume))
     : defaults.volume;
+  // Before schema 3 resumeBehavior had no UI and always held the "track"
+  // default, so it carries no user choice: adopt the new default.
+  const legacy = !raw?.schemaVersion || raw.schemaVersion < 3;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     shuffle: Boolean(raw?.shuffle),
     repeat: parseRepeat(raw?.repeat),
     volume,
     muted: Boolean(raw?.muted),
+    playbackRate: normalizeRate(raw?.playbackRate),
     visualizerQuality: raw?.visualizerQuality === "high" ? "high" : "low",
-    resumeBehavior: raw?.resumeBehavior === "position" ? "position" : "track",
+    resumeBehavior: legacy ? "position" : raw?.resumeBehavior === "track" ? "track" : "position",
     libraryMode: raw?.libraryMode === "albums" || raw?.libraryMode === "artists" ? raw.libraryMode : "songs",
     librarySort: raw?.librarySort === "artist" || raw?.librarySort === "album" || raw?.librarySort === "bitrate" || raw?.librarySort === "duration"
       ? raw.librarySort

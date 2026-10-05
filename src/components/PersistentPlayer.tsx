@@ -1,20 +1,27 @@
 import {
   ListMusic, Maximize2, Minimize2, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Volume2, VolumeX,
 } from "lucide-react";
-import {useEffect, useState} from "react";
+import {memo} from "react";
+import {CoverImage} from "./CoverImage";
+import type {SleepMode} from "../hooks/useSleepTimer";
+import {useCurrentTime} from "../lib/timeStore";
 import type {RepeatMode, Track} from "../types";
+import {PlayerOptions} from "./PlayerOptions";
 import {RangeSlider} from "./RangeSlider";
 
 type Props = {
   track?: Track;
   playing: boolean;
-  currentTime: number;
   duration: number;
   volume: number;
   muted: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
   compact: boolean;
+  rate: number;
+  sleep: SleepMode;
+  onRate: (rate: number) => void;
+  onSleep: (mode: SleepMode) => void;
   onTogglePlay: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -33,20 +40,25 @@ const formatTime = (seconds: number) => {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 };
 
+/** Only this leaf subscribes to the 4 Hz playback clock. */
+const PlayerProgress = memo(function PlayerProgress({duration, onSeek}: {duration: number; onSeek: (ratio: number) => void}) {
+  const currentTime = useCurrentTime();
+  const progress = duration ? Math.min(1, currentTime / duration) : 0;
+  return (
+    <div className="player-progress">
+      <time>{formatTime(currentTime)}</time>
+      <RangeSlider step={0.001} value={progress} onChange={onSeek} ariaLabel="Seek through track" />
+      <time>{formatTime(duration)}</time>
+    </div>
+  );
+});
+
 export function PersistentPlayer(props: Props) {
-  const progress = props.duration ? Math.min(1, props.currentTime / props.duration) : 0;
-  const [artFailed, setArtFailed] = useState(false);
-  useEffect(() => setArtFailed(false), [props.track?.id]);
   return (
     <footer className="persistent-player" aria-label="Music player">
       <button type="button" className="player-track" onClick={props.onOpenNowPlaying} disabled={!props.track}>
         {props.track ? (
-          <img
-            className={artFailed || props.track.coverUrl.includes("music-note.") ? "fallback-note" : ""}
-            src={artFailed ? "/music-note.svg" : props.track.coverUrl}
-            onError={() => setArtFailed(true)}
-            alt=""
-          />
+          <CoverImage src={props.track.coverUrl} seed={props.track.id} />
         ) : <span className="player-art-empty" />}
         <span><strong>{props.track?.title || "Nothing playing"}</strong><small>{props.track?.artist || "Choose a song from your library"}</small></span>
       </button>
@@ -62,13 +74,10 @@ export function PersistentPlayer(props: Props) {
             {props.repeat === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
           </button>
         </div>
-        <div className="player-progress">
-          <time>{formatTime(props.currentTime)}</time>
-          <RangeSlider step={0.001} value={progress} onChange={props.onSeek} ariaLabel="Seek through track" />
-          <time>{formatTime(props.duration)}</time>
-        </div>
+        <PlayerProgress duration={props.duration} onSeek={props.onSeek} />
       </div>
       <div className="player-tools">
+        <PlayerOptions rate={props.rate} sleep={props.sleep} onRate={props.onRate} onSleep={props.onSleep} />
         <button type="button" onClick={props.onToggleQueue} aria-label="Open queue"><ListMusic size={17} /></button>
         <button type="button" onClick={props.onToggleMute} aria-label={props.muted ? "Unmute" : "Mute"}>
           {props.muted || props.volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}

@@ -1,8 +1,11 @@
-import {useDeferredValue, useEffect, useMemo, useState, type ComponentType, type DragEvent} from "react";
+import {memo, useDeferredValue, useEffect, useMemo, useState, type ComponentType, type CSSProperties, type DragEvent} from "react";
 import {
   Archive, ArrowDown, ArrowLeft, ArrowUp, Check, Clapperboard, FileArchive, GripVertical, LoaderCircle, Pencil, Play, Plus, Search, Shuffle, Trash2, X,
 } from "lucide-react";
 import type {Playlist, Track} from "../types";
+import {accentCss, useAccent} from "../lib/accent";
+import {playlistCoverUrls} from "../lib/coverUtils";
+import {toast} from "../lib/toast";
 import {CustomSelect} from "./CustomSelect";
 import {PlaylistCover} from "./PlaylistCover";
 
@@ -11,6 +14,26 @@ const formatTime = (seconds: number) => {
   const rounded = Math.max(0, Math.floor(seconds));
   return `${String(Math.floor(rounded / 60)).padStart(2, "0")}:${String(rounded % 60).padStart(2, "0")}`;
 };
+
+/** Moves `fromId` so it takes the position `toId` currently has. */
+export function moveTrackId(ids: string[], fromId: string, toId: string): string[] {
+  const from = ids.indexOf(fromId);
+  const to = ids.indexOf(toId);
+  if (from < 0 || to < 0 || from === to) return ids;
+  const next = [...ids];
+  next.splice(from, 1);
+  next.splice(to, 0, fromId);
+  return next;
+}
+
+/** "3:42" under an hour, "2 hr 5 min" above, so long playlists stay readable. */
+export function formatTotalDuration(seconds: number) {
+  const total = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0));
+  if (total < 3600) return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  return minutes === 60 ? `${hours + 1} hr` : `${hours} hr ${minutes} min`;
+}
 
 export const toggleTrackMembership = (trackIds: string[], trackId: string) =>
   trackIds.includes(trackId) ? trackIds.filter((id) => id !== trackId) : [...trackIds, trackId];
@@ -68,7 +91,47 @@ export type PlaylistViewProps = {
   exporting?: boolean;
   busy?: boolean;
   createRequest?: number;
+  /** Track currently loaded in the player, for the now-playing marker. */
+  currentTrackId?: string;
+  playing?: boolean;
 };
+
+/** Three bars animated with CSS only; frozen when audio is paused. */
+function Equalizer({playing}: {playing: boolean}) {
+  return <span className={`eq ${playing ? "on" : ""}`} aria-label={playing ? "Playing" : "Paused"}><i /><i /><i /></span>;
+}
+
+const PlaylistTile = memo(function PlaylistTile({playlist, byId, duration, onOpen, onPlay}: {
+  playlist: Playlist;
+  byId: Map<string, Track>;
+  duration: number;
+  onOpen: () => void;
+  onPlay: (shuffle: boolean) => void;
+}) {
+  const firstCover = useMemo(() => playlistCoverUrls(playlist.trackIds, byId)[0], [playlist.trackIds, byId]);
+  const accent = useAccent(firstCover, playlist.id);
+  return (
+    <div className="playlist-tile" style={{"--accent": accentCss(accent)} as CSSProperties}>
+      <div className="playlist-tile-art">
+        <button type="button" className="playlist-tile-open" onClick={onOpen} aria-label={`Open ${playlist.name}`}>
+          <PlaylistCover trackIds={playlist.trackIds} tracksById={byId} size={40} className="tile-cover" />
+        </button>
+        <span className="tile-actions">
+          <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(true)} title="Shuffle" aria-label={`Shuffle ${playlist.name}`}>
+            <Shuffle size={14} />
+          </button>
+          <button type="button" className="icon-btn tile-play" disabled={!playlist.trackIds.length} onClick={() => onPlay(false)} title="Play" aria-label={`Play ${playlist.name}`}>
+            <Play size={16} fill="currentColor" />
+          </button>
+        </span>
+      </div>
+      <button type="button" className="playlist-tile-copy" onClick={onOpen}>
+        <strong>{playlist.name}</strong>
+        <small>{playlist.trackIds.length} track{playlist.trackIds.length === 1 ? "" : "s"} · {formatTotalDuration(duration)}</small>
+      </button>
+    </div>
+  );
+});
 
 export function PlaylistView({
   playlists,
@@ -88,6 +151,8 @@ export function PlaylistView({
   exporting,
   busy,
   createRequest = 0,
+  currentTrackId,
+  playing = false,
 }: PlaylistViewProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editPlaylist, setEditPlaylist] = useState<Playlist | null>(null);
@@ -99,6 +164,8 @@ export function PlaylistView({
   const [playlistQuery, setPlaylistQuery] = useState("");
   const [playlistSort, setPlaylistSort] = useState<PlaylistSort>("order");
   const [playlistSortDirection, setPlaylistSortDirection] = useState<PlaylistSortDirection>("asc");
+  const [rowDragId, setRowDragId] = useState<string | null>(null);
+  const [rowDropId, setRowDropId] = useState<string | null>(null);
   const byId = useMemo(() => new Map(tracks.map((track) => [track.id, track])), [tracks]);
   const openPlaylist = openId ? playlists.find((playlist) => playlist.id === openId) || null : null;
   const deferredPlaylistQuery = useDeferredValue(playlistQuery.trim().toLocaleLowerCase());
@@ -113,6 +180,33 @@ export function PlaylistView({
     setPlaylistSort("order");
     setPlaylistSortDirection("asc");
   }, [openId]);
+
+  const heroCover = useMemo(
+    () => (openPlaylist ? playlistCoverUrls(openPlaylist.trackIds, byId)[0] : undefined),
+    [openPlaylist, byId],
+  );
+  const heroAccent = useAccent(heroCover, openPlaylist?.id ?? "none");
+  // Reordering by drag only makes sense when the list shows true playlist order.
+  const canReorder = playlistSort === "order" && !deferredPlaylistQuery;
+
+  const removeFromPlaylist = async (playlist: Playlist, trackId: string) => {
+    const previous = playlist.trackIds;
+    const title = byId.get(trackId)?.title ?? "Track";
+    await onUpdateTracks(playlist.id, previous.filter((id) => id !== trackId));
+    toast.info(`Removed “${title}” from ${playlist.name}.`, {
+      actionLabel: "Undo",
+      onAction: () => void onUpdateTracks(playlist.id, previous),
+    });
+  };
+
+  const dropRow = async (playlist: Playlist, targetId: string) => {
+    const dragged = rowDragId;
+    setRowDragId(null);
+    setRowDropId(null);
+    if (!dragged || dragged === targetId) return;
+    const next = moveTrackId(playlist.trackIds, dragged, targetId);
+    if (next !== playlist.trackIds) await onUpdateTracks(playlist.id, next);
+  };
 
   const durationOf = (playlist: Playlist) =>
     playlist.trackIds.reduce((sum, id) => sum + (byId.get(id)?.duration || 0), 0);
@@ -203,51 +297,45 @@ export function PlaylistView({
       {zipStatus ? <p className="playlist-share-status" role="status">{zipStatus}</p> : null}
 
       {openPlaylist ? (
-        <div className="playlist-detail-view custom-scroll">
+        <div className="playlist-detail-view custom-scroll" style={{"--accent": accentCss(heroAccent)} as CSSProperties}>
           <button type="button" className="back-link" onClick={() => setOpenId(null)}>
             <ArrowLeft size={15} />View all playlists
           </button>
-          <div className="playlist-detail-head">
-            <div className="playlist-detail-title">
-              <PlaylistCover trackIds={openPlaylist.trackIds} tracksById={byId} size={56} />
-              <div>
-                <h2>{openPlaylist.name}</h2>
-                <p>{openPlaylist.trackIds.length} tracks · {formatTime(durationOf(openPlaylist))}</p>
+          <header className="pl-hero">
+            <PlaylistCover trackIds={openPlaylist.trackIds} tracksById={byId} size={168} className="pl-hero-cover" />
+            <div className="pl-hero-copy">
+              <span className="eyebrow">Playlist</span>
+              <h2>{openPlaylist.name}</h2>
+              <p>{openPlaylist.trackIds.length} track{openPlaylist.trackIds.length === 1 ? "" : "s"} · {formatTotalDuration(durationOf(openPlaylist))}</p>
+              <div className="pl-hero-actions">
+                <button type="button" className="pl-play" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, false)}>
+                  <Play size={15} fill="currentColor" />Play
+                </button>
+                <button type="button" className="pl-ghost" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, true)}>
+                  <Shuffle size={14} />Shuffle
+                </button>
+                <span className="pl-hero-tools">
+                  {onExportZip ? (
+                    <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length || zipBusy} onClick={() => onExportZip(openPlaylist)} title="Export as zip" aria-label={`Export ${openPlaylist.name} as zip`}>
+                      {zipBusy ? <LoaderCircle className="spin" size={14} /> : <Archive size={14} />}
+                    </button>
+                  ) : null}
+                  {onExport ? (
+                    <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length || exporting} onClick={() => onExport(openPlaylist)} title="Export video" aria-label={`Export video ${openPlaylist.name}`}>
+                      {exporting ? <LoaderCircle className="spin" size={14} /> : <Clapperboard size={14} />}
+                    </button>
+                  ) : null}
+                  <button type="button" className="icon-btn" onClick={() => openEdit(openPlaylist)} title="Edit" aria-label={`Edit ${openPlaylist.name}`}>
+                    <Pencil size={14} />
+                  </button>
+                  <button type="button" className="icon-btn danger" onClick={() => onDelete(openPlaylist.id, openPlaylist.name)} title="Delete" aria-label={`Delete ${openPlaylist.name}`}>
+                    <Trash2 size={14} />
+                  </button>
+                </span>
               </div>
             </div>
-            <div className="playlist-row-actions dense">
-              <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, false)} title="Play" aria-label={`Play ${openPlaylist.name}`}>
-                <Play size={13} fill="currentColor" />
-              </button>
-              <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length} onClick={() => onPlay(openPlaylist, true)} title="Shuffle" aria-label={`Shuffle ${openPlaylist.name}`}>
-                <Shuffle size={13} />
-              </button>
-              {onExportZip ? (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  disabled={!openPlaylist.trackIds.length || zipBusy}
-                  onClick={() => onExportZip(openPlaylist)}
-                  title="Export as zip"
-                  aria-label={`Export ${openPlaylist.name} as zip`}
-                >
-                  {zipBusy ? <LoaderCircle className="spin" size={13} /> : <Archive size={13} />}
-                </button>
-              ) : null}
-              {onExport ? (
-                <button type="button" className="icon-btn" disabled={!openPlaylist.trackIds.length || exporting} onClick={() => onExport(openPlaylist)} title="Export video" aria-label={`Export video ${openPlaylist.name}`}>
-                  {exporting ? <LoaderCircle className="spin" size={13} /> : <Clapperboard size={13} />}
-                </button>
-              ) : null}
-              <button type="button" className="icon-btn" onClick={() => openEdit(openPlaylist)} title="Edit" aria-label={`Edit ${openPlaylist.name}`}>
-                <Pencil size={13} />
-              </button>
-              <button type="button" className="icon-btn danger" onClick={() => onDelete(openPlaylist.id, openPlaylist.name)} title="Delete" aria-label={`Delete ${openPlaylist.name}`}>
-                <Trash2 size={13} />
-              </button>
-            </div>
-          </div>
-          <div className="playlist-detail-controls">
+          </header>
+          <div className="playlist-detail-controls pl-sticky">
             <label className="library-search-v2 playlist-search-v2">
               <Search size={14} aria-hidden="true" />
               <input
@@ -291,28 +379,76 @@ export function PlaylistView({
               {deferredPlaylistQuery ? `${playlistTracks.length} of ${openPlaylist.trackIds.length} tracks` : `${playlistTracks.length} tracks`}
             </span>
           </div>
-          <div className="playlist-detail-columns" aria-hidden="true">
-            <span />
+          <div className="pl-columns" aria-hidden="true">
+            <span>#</span>
             <span>Song</span>
             <span className="song-album">Album</span>
             <span>Length</span>
+            <span />
           </div>
-          <div className="playlist-detail-list">
-            {playlistTracks.map((track) => {
+          <div className="pl-list">
+            {playlistTracks.map((track, position) => {
               const id = track.id;
+              const isCurrent = id === currentTrackId;
               return (
-                <button
-                  type="button"
+                <div
                   key={id}
-                  className="playlist-detail-row"
-                  onClick={() => onPlayTrack?.(openPlaylist, id)}
-                  aria-label={`Play ${track.title} by ${track.artist}`}
+                  className={`pl-row ${isCurrent ? "current" : ""} ${rowDropId === id && rowDragId !== id ? "drop-target" : ""} ${rowDragId === id ? "dragging" : ""}`}
+                  draggable={canReorder}
+                  onDragStart={(event) => {
+                    setRowDragId(id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", id);
+                  }}
+                  onDragOver={(event) => {
+                    if (!rowDragId) return;
+                    event.preventDefault();
+                    if (rowDropId !== id) setRowDropId(id);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    void dropRow(openPlaylist, id);
+                  }}
+                  onDragEnd={() => {
+                    setRowDragId(null);
+                    setRowDropId(null);
+                  }}
                 >
-                  <TrackCover track={track} />
-                  <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
-                  <span className="song-album">{track.album || "Unknown album"}</span>
-                  <time>{formatTime(track.duration)}</time>
-                </button>
+                  <button
+                    type="button"
+                    className="pl-row-main"
+                    onClick={() => onPlayTrack?.(openPlaylist, id)}
+                    aria-label={`Play ${track.title} by ${track.artist}`}
+                    aria-current={isCurrent || undefined}
+                  >
+                    <span className="pl-index">
+                      {isCurrent ? <Equalizer playing={playing} /> : (
+                        <>
+                          <span className="pl-num">{position + 1}</span>
+                          <Play className="pl-hover-play" size={12} fill="currentColor" />
+                        </>
+                      )}
+                    </span>
+                    <span className="pl-song">
+                      <TrackCover track={track} />
+                      <span className="track-copy"><strong>{track.title}</strong><small>{track.artist}</small></span>
+                    </span>
+                    <span className="song-album">{track.album || "Unknown album"}</span>
+                    <time>{formatTime(track.duration)}</time>
+                  </button>
+                  <span className="pl-row-tools">
+                    {canReorder ? <GripVertical size={13} className="pl-grip" aria-hidden="true" /> : null}
+                    <button
+                      type="button"
+                      className="pl-remove"
+                      title="Remove from playlist"
+                      aria-label={`Remove ${track.title} from ${openPlaylist.name}`}
+                      onClick={() => void removeFromPlaylist(openPlaylist, id)}
+                    >
+                      <X size={13} />
+                    </button>
+                  </span>
+                </div>
               );
             })}
             {!playlistTracks.length && openPlaylist.trackIds.length > 0 ? (
@@ -321,39 +457,30 @@ export function PlaylistView({
               </p>
             ) : null}
             {!openPlaylist.trackIds.length ? (
-              <p className="empty-library">This playlist has no tracks yet. Edit it and pick some from your library.</p>
+              <p className="empty-library">This playlist is empty. Choose Edit to pick songs, or add them from the Library with the playlist button or right-click menu.</p>
             ) : null}
           </div>
         </div>
       ) : (
         <div className="playlist-tiles custom-scroll">
           {playlists.map((playlist) => (
-            <div key={playlist.id} className="playlist-tile">
-              <div className="playlist-tile-art">
-                <button
-                  type="button"
-                  className="playlist-tile-open"
-                  onClick={() => setOpenId(playlist.id)}
-                  aria-label={`Open ${playlist.name}`}
-                >
-                  <PlaylistCover trackIds={playlist.trackIds} tracksById={byId} size={40} className="tile-cover" />
-                </button>
-                <span className="tile-actions">
-                  <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, false)} title="Play" aria-label={`Play ${playlist.name}`}>
-                    <Play size={14} fill="currentColor" />
-                  </button>
-                  <button type="button" className="icon-btn" disabled={!playlist.trackIds.length} onClick={() => onPlay(playlist, true)} title="Shuffle" aria-label={`Shuffle ${playlist.name}`}>
-                    <Shuffle size={14} />
-                  </button>
-                </span>
-              </div>
-              <button type="button" className="playlist-tile-copy" onClick={() => setOpenId(playlist.id)}>
-                <strong>{playlist.name}</strong>
-                <small>{playlist.trackIds.length} tracks · {formatTime(durationOf(playlist))}</small>
-              </button>
-            </div>
+            <PlaylistTile
+              key={playlist.id}
+              playlist={playlist}
+              byId={byId}
+              duration={durationOf(playlist)}
+              onOpen={() => setOpenId(playlist.id)}
+              onPlay={(shuffle) => onPlay(playlist, shuffle)}
+            />
           ))}
-          {!playlists.length ? <p className="empty-library">No playlists yet. Create one and select its tracks.</p> : null}
+          {!playlists.length ? (
+            <div className="playlist-empty">
+              <Plus size={30} strokeWidth={1.4} />
+              <strong>No playlists yet</strong>
+              <span>Create one, or heart a song to start Favorites.</span>
+              <button type="button" className="secondary-button" onClick={openCreate}><Plus size={14} />Create playlist</button>
+            </div>
+          ) : null}
         </div>
       )}
 

@@ -1,3 +1,28 @@
+# Prismatic 2.2.0
+
+## Full-library backup, a calmer player, and a nicer look
+
+- **Full backup and restore** — Settings → Backup & restore writes one zip with every audio file, playlists, title/artist edits and settings. Restoring merges into your library, skips audio you already have (matched by content, not file name), verifies checksums, can be cancelled, and never leaves a half-written archive. Also exports CSV and M3U8 lists.
+- **Resume where you stopped** — the last track and position come back after a restart (toggle in Settings).
+- **Speed and sleep timer** — 0.5×–2× with pitch preserved; sleep after 15/30/60 minutes (with a gentle fade) or at the end of the track.
+- **Keyboard** — N/P next/previous, ↑/↓ volume, S shuffle, R repeat, [ ] speed, Shift+←/→ 30 s, 0–9 jump, Q queue, / search, **?** for the full cheat-sheet. Ctrl+Q no longer hijacks the OS quit shortcut.
+- **Open with and drag-and-drop** — double-click audio files (associations registered by the installer), or drop files and folders anywhere in the window. A second launch hands its files to the running window.
+- **Library tools** — right-click menu (play next, add to queue, favorite, add to playlist, show in folder, remove), Ctrl/Shift multi-select with a bulk bar, Favorites and Recent filters, drag-to-reorder queue, toasts with Undo.
+- **Playlists, redesigned** — accent-tinted tiles, hero header with Play/Shuffle, now-playing equalizer, drag-to-reorder rows, remove with Undo, sticky search/sort bar.
+- **Placeholder artwork** — tracks without artwork get a generated gradient tile instead of a plain icon.
+
+## Performance
+
+- Playback position no longer re-renders the app 4 times a second; only the seek bar, clock and visualizer read it.
+- The library watcher poll pauses while the window is hidden; media-session position updates only on state changes.
+- Config files are written atomically (temp file + rename).
+
+## Upgrade
+
+Install 2.2.0. Library under `Music/Prismatic` is preserved. Saved preferences migrate automatically.
+
+---
+
 # Prismatic 2.1.15
 
 ## Now Playing, renewed

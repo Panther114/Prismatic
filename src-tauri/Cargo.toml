@@ -1,6 +1,6 @@
 [package]
 name = "prismatic"
-version = "2.1.15"
+version = "2.2.0"
 description = "A lightweight cinematic music player and visual exporter"
 authors = ["Prismatic"]
 edition = "2021"
@@ -39,6 +39,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 # Faster CI/local release builds; still small enough for shipping.

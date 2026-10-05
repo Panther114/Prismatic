@@ -1,10 +1,12 @@
 import {useDeferredValue, useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent, type UIEvent} from "react";
 import {createPortal} from "react-dom";
 import {
-  Album, ArrowDown, ArrowLeft, ArrowUp, Clock3, ListPlus, LoaderCircle, Music2, Plus, Search, Trash2, UserRound, X,
+  Album, ArrowDown, ArrowLeft, ArrowUp, Clock3, Heart, ListEnd, ListPlus, ListStart, LoaderCircle, Music2, Plus, Search, Trash2, UserRound, X,
 } from "lucide-react";
 import type {LibraryMode, LibrarySort, Playlist, Track} from "../types";
 import {CustomSelect} from "./CustomSelect";
+import {TrackContextMenu, type ContextMenuState} from "./TrackContextMenu";
+import {CoverImage} from "./CoverImage";
 
 const ROW_HEIGHT = 40;
 const OVERSCAN = 7;
@@ -29,7 +31,37 @@ type Props = {
   onClear: () => void;
   onImportFiles: () => void;
   onImportFolder: () => void;
+  favoriteIds: Set<string>;
+  /** Most recently played first. */
+  recentIds: string[];
+  canReveal: boolean;
+  onToggleFavorite: (ids: string[]) => void;
+  onPlayNext: (ids: string[]) => void;
+  onAddToQueue: (ids: string[]) => void;
+  onAddManyToPlaylist: (playlistId: string, ids: string[]) => void;
+  onRemoveMany: (ids: string[]) => void;
+  onReveal: (track: Track) => void;
 };
+
+export type LibraryFilter = "all" | "favorites" | "recent";
+
+/** Tracks in `order` that exist in `tracks`, keeping the order given. */
+export function orderByIds(tracks: Track[], order: string[]): Track[] {
+  const byId = new Map(tracks.map((track) => [track.id, track]));
+  return order.flatMap((id) => {
+    const track = byId.get(id);
+    return track ? [track] : [];
+  });
+}
+
+/** Inclusive id range between two rows, in list order (for shift-click selection). */
+export function selectRange(tracks: Track[], fromId: string, toId: string): string[] {
+  const from = tracks.findIndex((track) => track.id === fromId);
+  const to = tracks.findIndex((track) => track.id === toId);
+  if (from < 0 || to < 0) return to < 0 ? [] : [toId];
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  return tracks.slice(start, end + 1).map((track) => track.id);
+}
 
 const formatTime = (seconds: number) => {
   const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
@@ -157,10 +189,19 @@ function VirtualTrackList({
   onRemove,
   removingId,
   onSort,
-}: Pick<Props, "tracks" | "selectedId" | "playlists" | "TrackCover" | "onPlay" | "onAddPlaylist" | "onRemove" | "removingId"> & {
+  favoriteIds,
+  checkedIds,
+  onRowSelect,
+  onRowContext,
+  onToggleFavorite,
+}: Pick<Props, "tracks" | "selectedId" | "playlists" | "TrackCover" | "onPlay" | "onAddPlaylist" | "onRemove" | "removingId" | "favoriteIds" | "onToggleFavorite"> & {
   sort: LibrarySort;
   direction: LibrarySortDirection;
   onSort: (field: LibrarySort) => void;
+  checkedIds: Set<string>;
+  /** Returns true when the click was a selection gesture (ctrl/cmd/shift). */
+  onRowSelect: (track: Track, event: MouseEvent<HTMLElement>) => boolean;
+  onRowContext: (track: Track, event: MouseEvent<HTMLElement>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -311,11 +352,17 @@ function VirtualTrackList({
           const bitrateLabel = formatBitrate(track.bitrate);
           const menuOpen = openMenuTrackId === track.id;
           return (
-          <article key={track.id} className={`song-row ${selectedId === track.id ? "selected" : ""}`}>
+          <article
+            key={track.id}
+            className={`song-row ${selectedId === track.id ? "selected" : ""} ${checkedIds.has(track.id) ? "checked" : ""}`}
+            aria-selected={checkedIds.has(track.id) || undefined}
+            onContextMenu={(event) => onRowContext(track, event)}
+          >
             <button
               type="button"
               className="song-main"
               onClick={(event) => {
+                if (onRowSelect(track, event)) return;
                 onPlay(track.id);
                 if (event.detail > 0) event.currentTarget.blur();
               }}
@@ -334,6 +381,16 @@ function VirtualTrackList({
               <time className="song-duration">{formatTime(track.duration)}</time>
             </button>
           <div className="song-row-actions">
+            <button
+              type="button"
+              className={`song-favorite ${favoriteIds.has(track.id) ? "on" : ""}`}
+              title={favoriteIds.has(track.id) ? "Remove from favorites" : "Add to favorites"}
+              aria-label={`${favoriteIds.has(track.id) ? "Remove" : "Add"} ${track.title} ${favoriteIds.has(track.id) ? "from" : "to"} favorites`}
+              aria-pressed={favoriteIds.has(track.id)}
+              onClick={() => onToggleFavorite([track.id])}
+            >
+              <Heart size={14} fill={favoriteIds.has(track.id) ? "currentColor" : "none"} />
+            </button>
             <details
               className="song-playlist-menu"
               open={menuOpen}
@@ -382,6 +439,11 @@ export function LibraryView(props: Props) {
   const [sortDirection, setSortDirection] = useState<LibrarySortDirection>("asc");
   const sortFieldRef = useRef<LibrarySort>(props.sort);
   const sortedFieldRef = useRef<LibrarySort | null>(null);
+  const [filter, setFilter] = useState<LibraryFilter>("all");
+  const [checked, setChecked] = useState<Set<string>>(() => new Set());
+  const anchorRef = useRef<string | null>(null);
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const tracksById = useMemo(() => new Map(props.tracks.map((track) => [track.id, track])), [props.tracks]);
 
   // Keep the local direction in sync if the parent restores a preference or
   // changes the field externally. Clicking a new header always starts ASC.
@@ -412,14 +474,78 @@ export function LibraryView(props: Props) {
   };
 
   const filtered = useMemo(() => {
+    const base = filter === "favorites"
+      ? props.tracks.filter((track) => props.favoriteIds.has(track.id))
+      : filter === "recent"
+        ? orderByIds(props.tracks, props.recentIds)
+        : props.tracks;
     const matches = deferredQuery
-      ? props.tracks.filter((track) =>
+      ? base.filter((track) =>
           track.title.toLowerCase().includes(deferredQuery)
           || track.artist.toLowerCase().includes(deferredQuery)
           || track.album.toLowerCase().includes(deferredQuery))
-      : props.tracks;
-    return sortTracks(matches, props.sort, sortDirection);
-  }, [deferredQuery, props.sort, props.tracks, sortDirection]);
+      : base;
+    // "Recent" is ordered by recency, not by the column sort.
+    return filter === "recent" ? matches : sortTracks(matches, props.sort, sortDirection);
+  }, [deferredQuery, filter, props.favoriteIds, props.recentIds, props.sort, props.tracks, sortDirection]);
+
+  // Selection must never point at rows that left the list (removed or filtered out).
+  useEffect(() => {
+    setChecked((current) => {
+      if (!current.size) return current;
+      const visible = new Set(filtered.map((track) => track.id));
+      const next = new Set([...current].filter((id) => visible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [filtered]);
+
+  useEffect(() => {
+    if (!checked.size) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || document.querySelector('.context-menu, [role="dialog"]')) return;
+      setChecked(new Set());
+      anchorRef.current = null;
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [checked.size]);
+
+  /** ctrl/cmd toggles a row, shift selects a range; plain clicks fall through to play. */
+  const handleRowSelect = (track: Track, event: MouseEvent<HTMLElement>) => {
+    const list = detailTracks || filtered;
+    if (event.shiftKey && anchorRef.current) {
+      const range = selectRange(list, anchorRef.current, track.id);
+      setChecked(new Set(event.ctrlKey || event.metaKey ? [...checked, ...range] : range));
+      return true;
+    }
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      setChecked((current) => {
+        const next = new Set(current);
+        if (next.has(track.id)) next.delete(track.id);
+        else next.add(track.id);
+        return next;
+      });
+      anchorRef.current = track.id;
+      return true;
+    }
+    if (checked.size) setChecked(new Set());
+    anchorRef.current = track.id;
+    return false;
+  };
+
+  const handleRowContext = (track: Track, event: MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    // Acting on a row outside the selection means "just this row".
+    const ids = checked.has(track.id) ? [...checked] : [track.id];
+    if (!checked.has(track.id)) setChecked(new Set());
+    setMenu({x: event.clientX, y: event.clientY, ids});
+  };
+
+  const bulkIds = [...checked];
+  const clearSelection = () => {
+    setChecked(new Set());
+    anchorRef.current = null;
+  };
 
   const groups = useMemo(() => {
     const field = props.mode === "albums" ? "album" : "artist";
@@ -455,6 +581,11 @@ export function LibraryView(props: Props) {
             <button type="button" className={props.mode === "albums" ? "active" : ""} onClick={() => props.onMode("albums")}>Albums</button>
             <button type="button" className={props.mode === "artists" ? "active" : ""} onClick={() => props.onMode("artists")}>Artists</button>
           </div>
+          <div className="segmented-control library-filter" aria-label="Show">
+            <button type="button" className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>All</button>
+            <button type="button" className={filter === "favorites" ? "active" : ""} onClick={() => setFilter("favorites")}><Heart size={11} />Favorites</button>
+            <button type="button" className={filter === "recent" ? "active" : ""} onClick={() => setFilter("recent")}>Recent</button>
+          </div>
           <label className="library-search-v2">
             <Search size={14} aria-hidden="true" />
             <input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="Search your library" aria-label="Search library" />
@@ -489,18 +620,41 @@ export function LibraryView(props: Props) {
       ) : filtered.length === 0 ? (
         <div className="library-empty">
           <Music2 size={34} />
-          <h2>{props.tracks.length ? "No matches" : "Your library is ready for music"}</h2>
-          <p>{props.tracks.length ? "Try another title, artist, or album." : "Add files or watch a folder. Prismatic keeps the originals untouched."}</p>
+          <h2>{props.tracks.length ? (filter === "favorites" && !deferredQuery ? "No favorites yet" : filter === "recent" && !deferredQuery ? "Nothing played yet" : "No matches") : "Your library is ready for music"}</h2>
+          <p>{props.tracks.length
+            ? (filter === "favorites" && !deferredQuery ? "Tap the heart on a song to keep it here."
+              : filter === "recent" && !deferredQuery ? "Songs you play will show up here."
+                : "Try another title, artist, or album.")
+            : "Drop files anywhere, or add a folder. Prismatic copies them into your library, so originals stay untouched."}</p>
           {!props.tracks.length ? <button type="button" className="primary-button" disabled={props.importing} onClick={props.onImportFiles}><Plus size={16} />{props.importing ? "Importing…" : "Add music"}</button> : null}
         </div>
       ) : props.mode === "songs" || detailTracks ? (
-        <VirtualTrackList
-          {...props}
-          tracks={detailTracks || filtered}
-          sort={props.sort}
-          direction={sortDirection}
-          onSort={handleSort}
-        />
+        <>
+          {checked.size ? (
+            <div className="bulk-bar" role="toolbar" aria-label="Selected songs">
+              <strong>{checked.size} selected</strong>
+              <button type="button" onClick={() => props.onPlayNext(bulkIds)}><ListStart size={13} />Play next</button>
+              <button type="button" onClick={() => props.onAddToQueue(bulkIds)}><ListEnd size={13} />Queue</button>
+              <button type="button" onClick={() => props.onToggleFavorite(bulkIds)}><Heart size={13} />Favorite</button>
+              <button type="button" onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setMenu({x: rect.left, y: rect.bottom + 4, ids: bulkIds, openPlaylists: true});
+              }}><ListPlus size={13} />Playlist…</button>
+              <button type="button" className="danger" onClick={() => props.onRemoveMany(bulkIds)}><Trash2 size={13} />Remove</button>
+              <button type="button" className="bulk-clear" onClick={clearSelection} aria-label="Clear selection"><X size={14} /></button>
+            </div>
+          ) : null}
+          <VirtualTrackList
+            {...props}
+            tracks={detailTracks || filtered}
+            sort={props.sort}
+            direction={sortDirection}
+            onSort={handleSort}
+            checkedIds={checked}
+            onRowSelect={handleRowSelect}
+            onRowContext={handleRowContext}
+          />
+        </>
       ) : (
         <div className="collection-grid custom-scroll">
           {groups.map(([name, tracks]) => {
@@ -514,7 +668,7 @@ export function LibraryView(props: Props) {
                 onClick={() => setCollection({kind: props.mode === "albums" ? "album" : "artist", name})}
               >
                 <span className="collection-art">
-                  {cover ? <img className={cover.coverUrl.includes("music-note.") ? "fallback-note" : ""} src={cover.coverUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/music-note.svg"; event.currentTarget.classList.add("fallback-note"); }} /> : props.mode === "albums" ? <Album /> : <UserRound />}
+                  {cover ? <CoverImage src={cover.coverUrl} seed={name} loading="lazy" /> : props.mode === "albums" ? <Album /> : <UserRound />}
                 </span>
                 <strong>{name}</strong>
                 <small>{tracks.length} tracks <Clock3 size={11} /> {formatTime(duration)}</small>
@@ -523,6 +677,24 @@ export function LibraryView(props: Props) {
           })}
         </div>
       )}
+      {menu ? (
+        <TrackContextMenu
+          key={`${menu.x}-${menu.y}-${menu.ids.length}-${menu.openPlaylists ? 1 : 0}`}
+          menu={menu}
+          tracksById={tracksById}
+          playlists={props.playlists}
+          favoriteIds={props.favoriteIds}
+          canReveal={props.canReveal}
+          onClose={() => setMenu(null)}
+          onPlay={props.onPlay}
+          onPlayNext={props.onPlayNext}
+          onAddToQueue={props.onAddToQueue}
+          onToggleFavorite={props.onToggleFavorite}
+          onAddToPlaylist={props.onAddManyToPlaylist}
+          onReveal={props.onReveal}
+          onRemove={props.onRemoveMany}
+        />
+      ) : null}
     </section>
   );
 }
