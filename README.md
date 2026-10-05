@@ -8,12 +8,16 @@ A lightweight music player for **Windows** and **macOS**. Built for everyday lis
 
 ## Highlights
 
-- **Fast library** — songs, albums, artists, search, sort, virtualized rows
-- **Persistent player** — keeps going while you browse, minimize, or switch tabs
-- **Queue you control** — shuffle, repeat, reorder, resume after restart
+- **Fast library** — songs, albums, artists, search, sort, favorites, recent, virtualized rows, right-click menu and multi-select
+- **Full backup & restore** — one zip with your audio, playlists, title edits and settings; restores merge and skip what you already have
+- **Persistent player** — keeps going while you browse, minimize, or switch tabs; resumes the last track and position after a restart
+- **Queue you control** — shuffle, repeat, drag to reorder, play next
+- **Speed & sleep timer** — 0.5×–2× with pitch preserved; fade out after 15/30/60 minutes or at the end of the track
+- **Keyboard first** — press `?` for every shortcut
+- **Open with & drag-and-drop** — double-click audio files, or drop files and folders anywhere in the window
 - **Now Playing** — audio-reactive visuals without a heavy desktop runtime
 - **Offline Studio** — export visuals on-device
-- **Playlists, redesigned** — mosaic-art card grid with play/shuffle on the cover, per-playlist song views, and sidebar quick play
+- **Playlists, redesigned** — accent-tinted cards, a hero header, now-playing equalizer, drag-to-reorder rows, remove with Undo
 - **Playlist zip** — export a set as a zip of audio files; import zip to forge a playlist
 - **Desktop shell** — Tauri 2 on Windows/macOS (~2.5 MiB installer on Windows)
 - **Auto-update** — signed updates from GitHub Releases (2.1.2+)
@@ -43,9 +47,13 @@ Your library lives at `Music/Prismatic` (plus a `.prismatic` state folder). Unin
 |:---:|:---:|
 | ![Library](docs/screenshots/library.jpg) | ![Playlists](docs/screenshots/playlists.jpg) |
 
-| Now Playing | Studio |
+| Playlist | Now Playing |
 |:---:|:---:|
-| ![Now Playing](docs/screenshots/now-playing.jpg) | ![Studio](docs/screenshots/studio.jpg) |
+| ![Playlist](docs/screenshots/playlist-detail.jpg) | ![Now Playing](docs/screenshots/now-playing.jpg) |
+
+| Settings: backup & restore | Studio |
+|:---:|:---:|
+| ![Settings](docs/screenshots/settings.jpg) | ![Studio](docs/screenshots/studio.jpg) |
 
 ## Develop
 
